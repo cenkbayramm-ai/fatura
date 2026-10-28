@@ -73,7 +73,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
-        raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
         
         esnek_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=esnek_parser)
@@ -136,14 +135,10 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
             xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
-            # XSLT içindeki dış bağlantılı (http) import/include etiketlerini acımasızca siler
             xslt_str = re.sub(r'<xsl:(import|include)[^>]*href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
-            xslt_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', xslt_str)
-            xslt_str = xslt_str.replace('="/.', '="./').replace("='/.", "='./")
             xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=esnek_parser)
             return etree.XSLT(xslt_root)
 
-        # 1. Aşama: Orijinal veya BİM şablonunu dene
         if xslt_content:
             try:
                 transform = sablon_derle(xslt_content)
@@ -151,7 +146,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                 hata_mesaji += f"Orijinal Şablon Hatası: {str(e)} | "
                 transform = None 
 
-        # 2. Aşama: Orijinal şablon çöktüyse hemen Yedek Şablona (sablon.xslt) geç
         if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
             try:
                 with open(fallback_xslt_path, 'rb') as f_sablon:
