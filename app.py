@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import io
 import re
-import shutil
 import base64
 import zipfile
 import tempfile
@@ -11,22 +10,28 @@ from lxml import etree
 import pdfkit
 from PyPDF2 import PdfMerger
 
-# --- YOL AYARLARI (Garantili Dosya Bulma) ---
+st.set_page_config(page_title="E-Fatura PDF Çevirici", page_icon="📄", layout="centered")
+
+# --- YOL AYARLARI ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WK_DIR = os.path.join(BASE_DIR, "wkhtmltox")
+TEMP_DIR = tempfile.gettempdir()
+WK_DIR = os.path.join(TEMP_DIR, "wkhtmltox")
 WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 
-# --- LINUX İÇİN PDF MOTORUNU OTOMATİK KURMA SİSTEMİ ---
-if not os.path.exists(WK_PATH):
-    try:
-        subprocess.run(["wget", "https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.4/wkhtmltox-0.12.4_linux-generic-amd64.tar.xz"], check=True)
-        subprocess.run(["tar", "xvf", "wkhtmltox-0.12.4_linux-generic-amd64.tar.xz"], check=True)
+# --- LINUX İÇİN PDF MOTORUNU TEMP KLASÖRÜNE KURMA ---
+@st.cache_resource
+def motoru_indir():
+    if not os.path.exists(WK_PATH):
+        tar_yolu = os.path.join(TEMP_DIR, "wk.tar.xz")
+        subprocess.run(["wget", "-O", tar_yolu, "https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.4/wkhtmltox-0.12.4_linux-generic-amd64.tar.xz"], check=True)
+        subprocess.run(["tar", "xf", tar_yolu, "-C", TEMP_DIR], check=True)
         subprocess.run(["chmod", "+x", WK_PATH], check=True)
-    except Exception as e:
-        print("Motor indirme hatası:", e)
-# ------------------------------------------------------
 
-st.set_page_config(page_title="E-Fatura PDF Çevirici", page_icon="📄", layout="centered")
+try:
+    motoru_indir()
+except Exception as e:
+    st.error(f"🚨 PDF Motoru İndirilirken Hata: {str(e)}")
+# ------------------------------------------------------
 
 def tum_arsivleri_ac(klasor_yolu):
     bulundu = True
@@ -137,7 +142,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
         if not os.path.exists(output_pdf_path) or os.path.getsize(output_pdf_path) < 10:
-            return False, "PDF dosyası fiziksel olarak oluşturulamadı (boyut çok küçük)."
+            return False, "PDF dosyası fiziksel olarak oluşturulamadı."
             
         return True, ""
     except Exception as e:
@@ -182,7 +187,6 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                 if not xml_dosyalari:
                     st.error("Yüklenen dosyaların içinde geçerli bir XML bulunamadı.")
                 else:
-                    # XML dosyalarını kronolojik olarak eskiden yeniye doğru sırala
                     xml_dosyalari.sort(key=lambda x: faturanin_tarihini_bul(x))
                     
                     merger = PdfMerger()
@@ -190,10 +194,7 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     basarisiz_sayisi = 0
                     hata_loglari = []
                     
-                    # Sabit Yollu Şablon Çağrısı
                     varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
-                    if not os.path.exists(varsayilan_sablon):
-                        st.warning("⚠️ 'sablon.xslt' dosyası GitHub klasöründe bulunamadı! Lütfen dosya adının tam olarak 'sablon.xslt' olduğundan emin olun.")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
