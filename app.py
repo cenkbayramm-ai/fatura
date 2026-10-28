@@ -62,13 +62,16 @@ def faturanin_tarihini_bul(xml_path):
     except Exception:
         return "9999-99-99 00:00:00"
 
-def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
+def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path=None):
     try:
         with open(xml_path, 'rb') as f:
             raw_content = f.read()
             
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
+            
+        # BİM faturası mı kontrolü (BİM VKN veya dosya linkinden tanır)
+        is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
@@ -82,6 +85,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
+        # 1. Önce faturanın gömülü XSLT'sini ara
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -123,31 +127,26 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
                     except Exception: pass
                     if xslt_content: break
 
-        transform = None
-        
-        if xslt_content:
-            try:
-                xslt_str = xslt_content.decode('utf-8', errors='ignore')
-                xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
-                xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=esnek_parser)
-                transform = etree.XSLT(xslt_root)
-            except Exception:
-                transform = None 
+        # 2. Gömülü tasarım yoksa, fatura BİM faturası mı diye bak ve yerel BİM şablonunu yükle
+        if not xslt_content and is_bim and bim_xslt_path and os.path.exists(bim_xslt_path):
+            with open(bim_xslt_path, 'rb') as f_bim:
+                xslt_content = f_bim.read()
 
-        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-            try:
-                with open(fallback_xslt_path, 'rb') as f_sablon:
-                    fallback_content = f_sablon.read()
-                fb_str = fallback_content.decode('utf-8', errors='ignore')
-                fb_str = re.sub(r'<\?xml.*\?>', '', fb_str)
-                fb_root = etree.fromstring(fb_str.encode('utf-8'), parser=esnek_parser)
-                transform = etree.XSLT(fb_root)
-            except Exception:
-                transform = None
-                
-        if transform is None:
-            return False, "Standard sablon da yuklenemedi."
+        # 3. Hiçbiri yoksa son çare normal standart yedek şablonu kullan
+        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+            with open(fallback_xslt_path, 'rb') as f_sablon:
+                xslt_content = f_sablon.read()
 
+        if not xslt_content:
+            return False, "Şablon bulunamadı."
+
+        xslt_content_str = xslt_content.decode('utf-8', errors='ignore')
+        xslt_content_str = re.sub(r'<\?xml.*\?>', '', xslt_content_str)
+        xslt_content_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', xslt_content_str)
+        xslt_content_str = xslt_content_str.replace('="/.', '="./').replace("='/.", "='./")
+
+        xslt_root = etree.fromstring(xslt_content_str.encode('utf-8'), parser=esnek_parser)
+        transform = etree.XSLT(xslt_root)
         html_dom = transform(tree)
         
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
@@ -156,19 +155,20 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
             'encoding': "UTF-8", 
             'enable-local-file-access': "",
             'enable-javascript': "",
-            'javascript-delay': 500,
+            'javascript-delay': 1000,
             'no-outline': None, 
             'quiet': ''
         }
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
         if not os.path.exists(output_pdf_path) or os.path.getsize(output_pdf_path) < 10:
-            return False, "PDF olusturulamadi."
+            return False, "PDF dosyası fiziksel olarak oluşturulamadı."
             
         return True, ""
     except Exception as e:
         return False, f"Teknik Hata: {str(e)}"
 
+# ----- WEB ARAYÜZÜ -----
 st.title("🚀 E-Fatura Toplu PDF Dönüştürücü")
 st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini **tarih sırasına göre** tek bir PDF olarak size sunacaktır.")
 
@@ -215,10 +215,14 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     hata_loglari = []
                     
                     varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
+                    bim_sablon = os.path.join(BASE_DIR, "bim_sablon.xslt")
+                    
+                    if not os.path.exists(bim_sablon):
+                        st.info("💡 BİM faturalarının %100 orijinal görünmesi için GitHub klasörüne 'bim_sablon.xslt' dosyasını yükleyebilirsiniz.")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
-                        basarili_mi, hata_mesaji = xml_to_pdf(xml_yol, pdf_cikti, fallback_xslt_path=varsayilan_sablon)
+                        basarili_mi, hata_mesaji = xml_to_pdf(xml_yol, pdf_cikti, fallback_xslt_path=varsayilan_sablon, bim_xslt_path=bim_sablon)
                         
                         if basarili_mi:
                             merger.append(pdf_cikti)
