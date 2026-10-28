@@ -11,6 +11,7 @@ import urllib.request
 from lxml import etree
 import pdfkit
 from PyPDF2 import PdfMerger
+import time
 
 # --- YOL AYARLARI ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,13 +24,18 @@ WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 def motoru_indir():
     if not os.path.exists(WK_PATH):
         tar_yolu = os.path.join(TEMP_DIR, "wk.tar.xz")
-        urllib.request.urlretrieve("https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.4/wkhtmltox-0.12.4_linux-generic-amd64.tar.xz", tar_yolu)
-        subprocess.run(["tar", "xf", tar_yolu, "-C", TEMP_DIR], check=True)
-        subprocess.run(["chmod", "+x", WK_PATH], check=True)
+        for _ in range(3): # Hata olursa 3 kez tekrar dener
+            try:
+                urllib.request.urlretrieve("https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.4/wkhtmltox-0.12.4_linux-generic-amd64.tar.xz", tar_yolu)
+                subprocess.run(["tar", "xf", tar_yolu, "-C", TEMP_DIR], check=True)
+                subprocess.run(["chmod", "+x", WK_PATH], check=True)
+                break
+            except Exception:
+                time.sleep(2)
 
 try:
     motoru_indir()
-except Exception as e:
+except Exception:
     pass
 
 st.set_page_config(page_title="E-Fatura Toplu PDF Dönüştürücü", page_icon="📄", layout="centered")
@@ -62,6 +68,19 @@ def faturanin_tarihini_bul(xml_path):
     except Exception:
         return "9999-99-99 00:00:00"
 
+# --- ÖZEL AĞ ÇÖZÜCÜ (XSLT içindeki dış linkleri indirmek için) ---
+class HttpsResolver(etree.Resolver):
+    def resolve(self, url, pubid, context):
+        if url.startswith('http'):
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    content = response.read()
+                return self.resolve_string(content.decode('utf-8', errors='ignore'), context)
+            except Exception:
+                pass
+        return None
+
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path=None):
     try:
         with open(xml_path, 'rb') as f:
@@ -74,8 +93,9 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         
-        esnek_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
-        tree = etree.fromstring(raw_content, parser=esnek_parser)
+        # Faturayı okurken ağ kapalı (Hızlı okuması için)
+        xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
+        tree = etree.fromstring(raw_content, parser=xml_parser)
         
         xslt_content = None
         namespaces = {
@@ -131,15 +151,14 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         transform = None
         hata_mesaji = ""
         
-        # --- NAZİK ŞABLON DERLEYİCİ ---
+        # Şablonu derlerken Ağ AÇIK (Dış linkleri sorunsuz indirebilmesi için resolver bağlandı)
+        xslt_parser = etree.XMLParser(recover=True)
+        xslt_parser.resolvers.add(HttpsResolver())
+        
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
-            
-            # Sadece dışarıdan dosya çağıran problemli kısımları sil, asıl yapıyı elleme!
-            xslt_str = re.sub(r'<xsl:import[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
-            xslt_str = re.sub(r'<xsl:include[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
-            
-            xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=esnek_parser)
+            xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
+            xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=xslt_parser)
             return etree.XSLT(xslt_root)
 
         if xslt_content:
