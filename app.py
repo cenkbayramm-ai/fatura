@@ -338,7 +338,7 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                         merger.write(final_pdf_yolu)
                         merger.close()
                         
-                        st.success(f>✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
+                        st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
                         
                         if basarisiz_sayisi > 0:
                             st.info(f"Not: {basarisiz_sayisi} adet fatura sorunlu olduğu için atlandı.")
