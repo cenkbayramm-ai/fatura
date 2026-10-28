@@ -98,31 +98,37 @@ def fatura_verilerini_ayikla(xml_path):
         vkn = ""
         customer_party = tree.xpath(".//*[local-name()='AccountingCustomerParty']")
         if customer_party:
-            vkn = get_text_by_tag_name('CompanyID', customer_party[0]) or get_text_by_tag_name('ID', customer_party[0])
+            vkn_raw = get_text_by_tag_name('CompanyID', customer_party[0]) or get_text_by_tag_name('ID', customer_party[0])
+            if vkn_raw:
+                vkn = str(vkn_raw).replace('.0', '').strip()
         
-        # Açıklama: Doğrudan Fatura Kalemlerindeki (InvoiceLine) Ürün/Hizmet Adını Çek
-        aciklama = ""
+        # --- KESİN ÇÖZÜM: SADECE FATURA KALEMLERİNDEKİ AÇIKLAMAYI ÇEK ---
+        aciklama_listesi = []
         invoice_lines = tree.xpath(".//*[local-name()='InvoiceLine']")
-        if invoice_lines:
-            aciklamalar = []
-            for line in invoice_lines:
-                item_name = get_text_by_tag_name('Name', line)
-                if not item_name:
-                    item_name = get_text_by_tag_name('Description', line)
-                if item_name:
-                    aciklamalar.append(item_name)
-            if aciklamalar:
-                aciklama = " | ".join(aciklamalar)
+        for line in invoice_lines:
+            items = line.xpath(".//*[local-name()='Item']")
+            for item in items:
+                # Önce Description, yoksa Name al
+                desc = get_text_by_tag_name('Description', item)
+                name = get_text_by_tag_name('Name', item)
                 
-        # Eğer kalem açıklaması yoksa fatura notuna bak
-        if not aciklama:
-            aciklama = get_text_by_tag_name('Note')
+                kalem_metni = desc if desc else name
+                if kalem_metni and kalem_metni not in aciklama_listesi:
+                    aciklama_listesi.append(kalem_metni)
+        
+        # Eğer kalemden hiç açıklama çıkmazsa, fatura notlarına bak (Çok uzun IBAN vb. metinleri es geç)
+        if not aciklama_listesi:
+            for note in tree.xpath(".//*[local-name()='Note']"):
+                if note.text and 5 < len(note.text.strip()) < 100:
+                    aciklama_listesi.append(note.text.strip())
+                    break
+                    
+        aciklama = " | ".join(aciklama_listesi)
             
         tevkifat_orani = ""
         ozel_matrah = ""
         genel_toplam = get_text_by_tag_name('PayableAmount')
         
-        # Standart KDV Sözlüğü (İstenilen sütun isimleriyle)
         kdv_dict = {
             "%1'lik KDV": None, "%8'lik KDV": None, "%10'lik KDV": None, "%18'lik KDV": None, "%20'lik KDV": None,
             "%1'lik Matrah": None, "%8'lik Matrah": None, "%10'lik Matrah": None, "%18'lik Matrah": None, "%20'lik Matrah": None
@@ -135,10 +141,10 @@ def fatura_verilerini_ayikla(xml_path):
             matrah = get_text_by_tag_name('TaxableAmount', subtotal)
             vergi = get_text_by_tag_name('TaxAmount', subtotal)
             
-            # Tevkifat Oranı Çekme
+            # Tevkifat (9015) ise genel KDV listesine ekleme, tevkifat oranına yaz
             if tax_code and '9015' in tax_code:
                 tevkifat_orani = oran
-                continue # Tevkifat matrahı, genel KDV listesine eklenmesin
+                continue 
                 
             if oran and matrah:
                 try:
@@ -151,7 +157,7 @@ def fatura_verilerini_ayikla(xml_path):
             "Fatura Tarihi": tarih,
             "Fatura Numarası": fatura_no,
             "Fatura Türü": fatura_turu,
-            "VKN TCKN": str(vkn).replace('.0', '') if vkn else "",
+            "VKN TCKN": vkn,
             "Açıklama": aciklama,
             "Tevkifat Oranı": tevkifat_orani,
             "Özel Matrah": ozel_matrah,
@@ -461,30 +467,44 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                         if excel_verileri:
                             df = pd.DataFrame(excel_verileri)
                             
-                            # Tamamen boş (None veya boş string) olan sütunları bul ve at
+                            # Tamamen boş olan sütunları bul ve at
                             df = df.dropna(axis=1, how='all')
                             for col in df.columns:
                                 if df[col].astype(str).str.strip().eq('').all() or df[col].astype(str).eq('None').all():
                                     df = df.drop(columns=[col])
                                     
-                            # Sütun sıralamasını istenilen formata göre düzenle
+                            # Sütun sıralaması
                             oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN TCKN", "Açıklama", "Tevkifat Oranı", "Özel Matrah"]
-                            diger_sutunlar = [c for c in df.columns if c not in oncelikli_sutunlar and c != "Toplam"]
                             
-                            # Matrah ve KDV Sütunlarını Rakanlarına Göre Sırala
-                            matrah_sutunlari = sorted([c for c in diger_sutunlar if 'Matrah' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
-                            kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                            # Matrahlar ve KDV'ler için sabit sıralama listesi
+                            matrah_sirasi = ["%1'lik Matrah", "%8'lik Matrah", "%10'lik Matrah", "%18'lik Matrah", "%20'lik Matrah"]
+                            kdv_sirasi = ["%1'lik KDV", "%8'lik KDV", "%10'lik KDV", "%18'lik KDV", "%20'lik KDV"]
                             
-                            # Matrahlar Açıklamadan sonra, KDV'ler en sonda
-                            son_sutunlar = oncelikli_sutunlar + matrah_sutunlari + kdv_sutunlari + ["Toplam"]
+                            mevcut_matrahlar = [c for c in matrah_sirasi if c in df.columns]
+                            mevcut_kdvler = [c for c in kdv_sirasi if c in df.columns]
+                            
+                            son_sutunlar = oncelikli_sutunlar + mevcut_matrahlar + mevcut_kdvler + ["Toplam"]
                             df = df[[c for c in son_sutunlar if c in df.columns]]
                             
-                            # Excel dosyasını belleğe yaz
+                            # Excel dosyasını belleğe yaz ve Sütun Genişliklerini Ayarla
                             excel_cikti_yolu = os.path.join(work_dir, "FATURA_LISTESI.xlsx")
                             with pd.ExcelWriter(excel_cikti_yolu, engine='openpyxl') as writer:
                                 df.to_excel(writer, index=False, sheet_name='FATURALAR')
+                                
+                                # Sütun genişliklerini otomatik ayarla
+                                worksheet = writer.sheets['FATURALAR']
+                                for i, col in enumerate(df.columns):
+                                    max_len = max(
+                                        df[col].astype(str).map(len).max(),
+                                        len(str(col))
+                                    ) + 2
+                                    # Sütun harfini hesapla (A, B, C... Z, AA, AB...)
+                                    if i < 26:
+                                        col_letter = chr(65 + i)
+                                    else:
+                                        col_letter = chr(64 + i // 26) + chr(65 + i % 26)
+                                    worksheet.column_dimensions[col_letter].width = max_len
                             
-                            # Verileri Session State'e kaydet
                             with open(excel_cikti_yolu, "rb") as excel_file:
                                 st.session_state.excel_data = excel_file.read()
 
@@ -493,10 +513,9 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                         st.session_state.hata_loglari = hata_loglari
                         st.session_state.islem_tamamlandi = True
                         
-                        # İşlem bittikten sonra butonların görünmesi için sayfayı yenile
                         st.rerun()
 
-# İşlem tamamlandıysa butonları göster (Sayfa yenilense bile silinmez)
+# İşlem tamamlandıysa butonları göster
 if st.session_state.islem_tamamlandi:
     st.success(f"✅ İşlem Tamamlandı! {st.session_state.basarili_sayisi} adet fatura PDF'e dönüştürüldü ve Excel listesi oluşturuldu.")
     
