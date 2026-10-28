@@ -8,7 +8,6 @@ import zipfile
 import tempfile
 import subprocess
 import urllib.request
-import urllib.parse
 from lxml import etree
 import pdfkit
 from PyPDF2 import PdfMerger
@@ -77,7 +76,9 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
+        # Firma Tespiti
         is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
+        is_soner = b'SONER' in raw_content.upper() or b'7740287383' in raw_content or b'QRSOVOS' in raw_content
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         
@@ -90,7 +91,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
-        # Gömülü şablonu al
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -132,10 +132,19 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                     except Exception: pass
                     if xslt_content: break
 
-        # BİM ise
-        if not xslt_content and is_bim and bim_xslt_path and os.path.exists(bim_xslt_path):
+        # --- KRİTİK DÜZELTME: ŞABLON EZME MANTIĞI ---
+        # Eğer fatura BİM veya Soner ise, içinden çıkan hatalı şablonu YUT ve bizim karekodlu bim_sablon.xslt'yi kullan!
+        if (is_bim or is_soner) and bim_xslt_path and os.path.exists(bim_xslt_path):
             with open(bim_xslt_path, 'rb') as f_bim:
                 xslt_content = f_bim.read()
+
+        # Eğer hala şablon yoksa standart yedeği kullan
+        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+            with open(fallback_xslt_path, 'rb') as f_sablon:
+                xslt_content = f_sablon.read()
+
+        if not xslt_content:
+            return False, "Şablon bulunamadı."
 
         transform = None
         xslt_parser = etree.XMLParser(recover=True, no_network=True)
@@ -143,51 +152,31 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
             xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
-            xslt_str = re.sub(r'<xsl:import[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
-            xslt_str = re.sub(r'<xsl:include[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            # İnternete çıkan zararlı dış linkleri kökünden siler
+            xslt_str = re.sub(r'<xsl:import[^>]+href=["\']https?://[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            xslt_str = re.sub(r'<xsl:include[^>]+href=["\']https?://[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            xslt_str = re.sub(r'<img[^>]+src=["\']https?://[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            
             xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=xslt_parser)
             return etree.XSLT(xslt_root)
 
-        if xslt_content:
-            try:
-                transform = sablon_derle(xslt_content)
-            except Exception:
-                transform = None 
+        try:
+            transform = sablon_derle(xslt_content)
+        except Exception:
+            if fallback_xslt_path and os.path.exists(fallback_xslt_path):
+                try:
+                    with open(fallback_xslt_path, 'rb') as f_sablon:
+                        transform = sablon_derle(f_sablon.read())
+                except: pass
 
-        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-            try:
-                with open(fallback_xslt_path, 'rb') as f_sablon:
-                    transform = sablon_derle(f_sablon.read())
-            except Exception:
-                transform = None
-                
         if transform is None:
-            return False, "Şablon kilitlendi."
+            return False, "Hiçbir şablon uygulanamadı."
 
-        # XSLT ile HTML kodunu üret
         html_dom = transform(tree)
         html_str = str(html_dom)
         
-        # --- ÖZEL KAREKOD VE LOGO İNDİRİCİ ---
-        # HTML içindeki bütün dış bağlantılı (http/https) resimleri bulur
-        dis_resimler = re.findall(r'src=["\'](https?://[^"\']+)["\']', html_str, flags=re.IGNORECASE)
-        for resim_url in dis_resimler:
-            try:
-                # URL içindeki özel karakterleri (Soner QR kodundaki süslü parantezler gibi) onar
-                safe_url = urllib.parse.quote(resim_url.replace('&quot;', '"'), safe=":/&?=")
-                req = urllib.request.Request(safe_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    img_data = response.read()
-                    
-                # Resmi indirip Base64 formatına çevir ve HTML'in içine kalıcı olarak göm
-                b64_img = base64.b64encode(img_data).decode('utf-8')
-                yeni_src = f"data:image/png;base64,{b64_img}"
-                html_str = html_str.replace(resim_url, yeni_src)
-            except Exception:
-                # İnternetten inmezse motor çökmesin diye boş bırak
-                html_str = html_str.replace(resim_url, "")
-
-        # Kötü huylu dış css dosyalarını temizle (Çökmeye sebep olan diğer faktör)
+        # Son temizlik: HTML içinde kalmış olabilecek SSL çökmelerine sebep olan linkleri pasifleştir
+        html_str = re.sub(r'src=["\']https?://[^"\']+["\']', 'src=""', html_str, flags=re.IGNORECASE)
         html_str = re.sub(r'href=["\']https?://[^"\']+\.css["\']', 'href=""', html_str, flags=re.IGNORECASE)
         
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
@@ -206,6 +195,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         try:
             pdfkit.from_string(html_str, output_pdf_path, configuration=config, options=options)
         except Exception:
+            # Motor yine de çökerse en temel yedek şablona zorla
             if fallback_xslt_path and os.path.exists(fallback_xslt_path):
                 with open(fallback_xslt_path, 'rb') as f_sablon:
                     transform_yedek = sablon_derle(f_sablon.read())
