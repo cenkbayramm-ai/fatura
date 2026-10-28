@@ -41,7 +41,8 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="E-Fatura Toplu PDF ve Excel Dönüştürücü", page_icon="📄", layout="centered")
+# Sayfa düzenini geniş ekran yapalım
+st.set_page_config(page_title="E-Fatura Toplu PDF ve Excel Dönüştürücü", page_icon="📄", layout="wide")
 
 def tum_arsivleri_ac(klasor_yolu):
     bulundu = True
@@ -71,7 +72,7 @@ def faturanin_tarihini_bul(xml_path):
     except Exception:
         return "9999-99-99 00:00:00"
 
-# --- EXCEL İÇİN VERİ AYIKLAMA FONKSİYONU ---
+# --- EXCEL İÇİN GELİŞMİŞ VERİ AYIKLAMA FONKSİYONU ---
 def fatura_verilerini_ayikla(xml_path):
     try:
         with open(xml_path, 'rb') as f:
@@ -79,41 +80,40 @@ def fatura_verilerini_ayikla(xml_path):
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
         
-        namespaces = {
-            'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2',
-            'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
-        }
-        
+        # Namespace bağımsız arama fonksiyonu (Ön ek fark etmeksizin tag ismine bakar)
+        def get_text_by_tag_name(tag_name, parent=None):
+            xpath = f".//*[local-name()='{tag_name}']"
+            elements = (parent if parent is not None else tree).xpath(xpath)
+            return elements[0].text.strip() if elements and elements[0].text else ""
+
         # Temel Bilgiler
-        tarih = tree.findtext('.//cbc:IssueDate', namespaces=namespaces) or ""
-        fatura_no = tree.findtext('.//cbc:ID', namespaces=namespaces) or ""
-        fatura_turu = tree.findtext('.//cbc:InvoiceTypeCode', namespaces=namespaces) or "SATIS"
+        tarih = get_text_by_tag_name('IssueDate')
+        fatura_no = get_text_by_tag_name('ID')
+        fatura_turu = get_text_by_tag_name('InvoiceTypeCode') or "SATIS"
         
         # Alıcı VKN
         vkn = ""
-        alici_party = tree.find('.//cac:AccountingCustomerParty/cac:Party', namespaces)
-        if alici_party is not None:
-            vkn = alici_party.findtext('.//cbc:CompanyID', namespaces=namespaces) or alici_party.findtext('.//cbc:ID', namespaces=namespaces) or ""
+        customer_party = tree.xpath(".//*[local-name()='AccountingCustomerParty']")
+        if customer_party:
+            vkn = get_text_by_tag_name('CompanyID', customer_party[0]) or get_text_by_tag_name('ID', customer_party[0])
         
         # Açıklama (İlk bulunan ürün/hizmet açıklaması veya genel açıklama)
-        aciklama = tree.findtext('.//cac:InvoiceLine/cac:Item/cbc:Name', namespaces=namespaces) or ""
+        aciklama = get_text_by_tag_name('Name')
         if not aciklama:
-            aciklama = tree.findtext('.//cbc:Note', namespaces=namespaces) or ""
+            aciklama = get_text_by_tag_name('Note')
             
-        # Tevkifat Oranı
-        tevkifat_orani = tree.findtext('.//cac:TaxTotal//cbc:Percent[../cbc:TaxTypeCode="9015"]', namespaces=namespaces) or ""
-        
         # Toplamlar
-        ozel_matrah = ""
-        kdv_toplam = tree.findtext('.//cac:TaxTotal/cbc:TaxAmount', namespaces=namespaces) or ""
-        genel_toplam = tree.findtext('.//cac:LegalMonetaryTotal/cbc:PayableAmount', namespaces=namespaces) or ""
+        kdv_toplam = get_text_by_tag_name('TaxAmount')
+        genel_toplam = get_text_by_tag_name('PayableAmount')
         
         # KDV Matrah ve Oranları (Dinamik)
         kdv_dict = {}
-        for subtotal in tree.findall('.//cac:TaxSubtotal', namespaces):
-            oran = subtotal.findtext('./cbc:Percent', namespaces=namespaces)
-            matrah = subtotal.findtext('./cbc:TaxableAmount', namespaces=namespaces)
-            vergi = subtotal.findtext('./cbc:TaxAmount', namespaces=namespaces)
+        # TaxSubtotal düğümlerini bul
+        tax_subtotals = tree.xpath(".//*[local-name()='TaxSubtotal']")
+        for subtotal in tax_subtotals:
+            oran = get_text_by_tag_name('Percent', subtotal)
+            matrah = get_text_by_tag_name('TaxableAmount', subtotal)
+            vergi = get_text_by_tag_name('TaxAmount', subtotal)
             
             if oran and matrah:
                 try:
@@ -127,10 +127,8 @@ def fatura_verilerini_ayikla(xml_path):
             "Fatura Tarihi": tarih,
             "Fatura Numarası": fatura_no,
             "Fatura Türü": fatura_turu,
-            "VKN/TCKN": vkn.replace('.0', '') if vkn else "",
+            "VKN/TCKN": str(vkn).replace('.0', '') if vkn else "",
             "Açıklama": aciklama,
-            "Tevkifat Oranı": tevkifat_orani,
-            "Özel Matrah": ozel_matrah,
             "Toplam KDV": float(kdv_toplam) if kdv_toplam else 0.0,
             "Genel Toplam": float(genel_toplam) if genel_toplam else 0.0,
             **kdv_dict
@@ -153,7 +151,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
         
-        # --- AKILLI KÜSURAT TEMİZLİĞİ ---
         for elem in tree.iter():
             if elem.text and type(elem.tag) == str:
                 tag_name = etree.QName(elem).localname
@@ -335,6 +332,18 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
     except Exception as e:
         return False, f"Teknik Hata: {str(e)}"
 
+# Session state başlatma (Butonların kaybolmasını önlemek için)
+if 'pdf_data' not in st.session_state:
+    st.session_state.pdf_data = None
+if 'excel_data' not in st.session_state:
+    st.session_state.excel_data = None
+if 'islem_tamamlandi' not in st.session_state:
+    st.session_state.islem_tamamlandi = False
+if 'basarili_sayisi' not in st.session_state:
+    st.session_state.basarili_sayisi = 0
+if 'hata_loglari' not in st.session_state:
+    st.session_state.hata_loglari = []
+
 # ----- WEB ARAYÜZÜ -----
 st.title("🚀 E-Fatura Toplu PDF ve Excel Dönüştürücü")
 st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini **tarih sırasına göre** tek bir PDF ve detaylı bir **Excel tablosu** olarak size sunacaktır.")
@@ -345,6 +354,13 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
     if not uploaded_files:
         st.warning("Lütfen en az bir dosya yükleyin.")
     else:
+        # Önceki işlem verilerini temizle
+        st.session_state.pdf_data = None
+        st.session_state.excel_data = None
+        st.session_state.islem_tamamlandi = False
+        st.session_state.basarili_sayisi = 0
+        st.session_state.hata_loglari = []
+
         with st.spinner('Motor hazırlanıyor ve faturalar işleniyor, lütfen bekleyin...'):
             with tempfile.TemporaryDirectory() as work_dir:
                 xml_dosyalari = []
@@ -398,94 +414,88 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                             basarisiz_sayisi += 1
                             hata_loglari.append(f"Fatura ({os.path.basename(xml_yol)}): {hata_mesaji}")
                         
-                        # Excel Verisi Ayıklama (PDF başarılı da olsa başarısız da olsa excele ekleyelim)
+                        # Excel Verisi Ayıklama
                         fatura_data = fatura_verilerini_ayikla(xml_yol)
                         if fatura_data:
                             excel_verileri.append(fatura_data)
                             
                     if basarili_sayisi > 0 or excel_verileri:
                         final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS_FATURALAR.pdf")
-                        merger.write(final_pdf_yolu)
+                        if os.path.exists(final_pdf_yolu):
+                            merger.write(final_pdf_yolu)
                         merger.close()
                         
-                        if basarili_sayisi > 0:
-                            st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
-                        if basarisiz_sayisi > 0:
-                            st.info(f"Not: {basarisiz_sayisi} adet fatura PDF'e dönüştürülemedi (Ancak Excel'e aktarıldı).")
-                            with st.expander("PDF Hata Detaylarını Görmek İçin Tıklayın"):
-                                for log in hata_loglari:
-                                    st.write(log)
-                                    
                         # --- EXCEL OLUŞTURMA VE BOŞ SÜTUNLARI TEMİZLEME ---
-                        df = pd.DataFrame(excel_verileri)
-                        
-                        # Tamamen boş olan sütunları bul ve at
-                        df = df.dropna(axis=1, how='all')
-                        for col in df.columns:
-                            if df[col].astype(str).str.strip().eq('').all() or df[col].astype(str).eq('None').all():
-                                df = df.drop(columns=[col])
-                                
-                        # Sütun sıralamasını (Tarih, No, VKN...) düzenle
-                        oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN/TCKN", "Açıklama", "Tevkifat Oranı", "Özel Matrah"]
-                        diger_sutunlar = [c for c in df.columns if c not in oncelikli_sutunlar]
-                        
-                        # KDV ve Matrah sütunlarını sırala
-                        kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c and 'Matrah' not in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
-                        matrah_sutunlari = sorted([c for c in diger_sutunlar if 'Matrah' in c and 'Özel' not in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
-                        kalan_sutunlar = [c for c in diger_sutunlar if c not in kdv_sutunlari and c not in matrah_sutunlari and c not in ["Toplam KDV", "Genel Toplam"]]
-                        
-                        son_sutunlar = oncelikli_sutunlar + kdv_sutunlari + matrah_sutunlari + kalan_sutunlar + ["Toplam KDV", "Genel Toplam"]
-                        df = df[[c for c in son_sutunlar if c in df.columns]]
-                        
-                        # Excel dosyasını belleğe yaz
-                        excel_cikti_yolu = os.path.join(work_dir, "FATURA_LISTESI.xlsx")
-                        with pd.ExcelWriter(excel_cikti_yolu, engine='openpyxl') as writer:
-                            df.to_excel(writer, index=False, sheet_name='FATURALAR')
+                        if excel_verileri:
+                            df = pd.DataFrame(excel_verileri)
                             
-                        # --- İNDİRME BUTONLARI ---
-                        col1, col2 = st.columns(2)
-                        
-                        # PDF İndirme
-                        if os.path.exists(final_pdf_yolu):
-                            with open(final_pdf_yolu, "rb") as pdf_file:
-                                PDFbyte = pdf_file.read()
+                            # Tamamen boş olan sütunları bul ve at
+                            df = df.dropna(axis=1, how='all')
+                            for col in df.columns:
+                                if df[col].astype(str).str.strip().eq('').all() or df[col].astype(str).eq('None').all():
+                                    df = df.drop(columns=[col])
+                                    
+                            # Sütun sıralamasını düzenle
+                            oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN/TCKN", "Açıklama"]
+                            diger_sutunlar = [c for c in df.columns if c not in oncelikli_sutunlar]
                             
-                            b64_pdf = base64.b64encode(PDFbyte).decode()
-                            js_pdf = f"""
-                            <script>
-                                var a = document.createElement('a');
-                                a.href = 'data:application/pdf;base64,{b64_pdf}';
-                                a.download = 'BIRLESTIRILMIS_FATURALAR.pdf';
-                                document.body.appendChild(a);
-                                a.click();
-                                document.body.removeChild(a);
-                            </script>
-                            """
-                            components.html(js_pdf, height=0)
+                            kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c and 'Matrah' not in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                            matrah_sutunlari = sorted([c for c in diger_sutunlar if 'Matrah' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                            kalan_sutunlar = [c for c in diger_sutunlar if c not in kdv_sutunlari and c not in matrah_sutunlari and c not in ["Toplam KDV", "Genel Toplam"]]
                             
-                            with col1:
-                                st.download_button(
-                                    label="📥 PDF İndir (Başlamadıysa Tıkla)",
-                                    data=PDFbyte,
-                                    file_name="BIRLESTIRILMIS_FATURALAR.pdf",
-                                    mime="application/pdf"
-                                )
-                        
-                        # Excel İndirme
-                        if os.path.exists(excel_cikti_yolu):
+                            son_sutunlar = oncelikli_sutunlar + kdv_sutunlari + matrah_sutunlari + kalan_sutunlar + ["Toplam KDV", "Genel Toplam"]
+                            df = df[[c for c in son_sutunlar if c in df.columns]]
+                            
+                            # Excel dosyasını belleğe yaz
+                            excel_cikti_yolu = os.path.join(work_dir, "FATURA_LISTESI.xlsx")
+                            with pd.ExcelWriter(excel_cikti_yolu, engine='openpyxl') as writer:
+                                df.to_excel(writer, index=False, sheet_name='FATURALAR')
+                            
+                            # Verileri Session State'e kaydet
                             with open(excel_cikti_yolu, "rb") as excel_file:
-                                Excelbyte = excel_file.read()
-                            with col2:
-                                st.download_button(
-                                    label="📊 Excel İndir",
-                                    data=Excelbyte,
-                                    file_name="FATURA_LISTESI.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                    else:
-                        st.error("Hiçbir fatura işlenemedi. Lütfen aşağıdaki hata raporunu bana kopyalayıp gönderin:")
-                        for log in hata_loglari:
-                            st.error(log)
+                                st.session_state.excel_data = excel_file.read()
+                        
+                        if os.path.exists(final_pdf_yolu) and os.path.getsize(final_pdf_yolu) > 10:
+                            with open(final_pdf_yolu, "rb") as pdf_file:
+                                st.session_state.pdf_data = pdf_file.read()
+
+                        st.session_state.basarili_sayisi = basarili_sayisi
+                        st.session_state.basarisiz_sayisi = basarisiz_sayisi
+                        st.session_state.hata_loglari = hata_loglari
+                        st.session_state.islem_tamamlandi = True
+                        
+                        # İşlem bittikten sonra butonların görünmesi için sayfayı yenile
+                        st.rerun()
+
+# İşlem tamamlandıysa butonları göster (Sayfa yenilense bile silinmez)
+if st.session_state.islem_tamamlandi:
+    st.success(f"✅ İşlem Tamamlandı! {st.session_state.basarili_sayisi} adet fatura PDF'e dönüştürüldü ve Excel listesi oluşturuldu.")
+    
+    if st.session_state.basarisiz_sayisi > 0:
+        st.info(f"Not: {st.session_state.basarisiz_sayisi} adet fatura PDF'e dönüştürülemedi.")
+        with st.expander("Hata Detaylarını Görmek İçin Tıklayın"):
+            for log in st.session_state.hata_loglari:
+                st.write(log)
+                
+    col1, col2 = st.columns(2)
+    if st.session_state.pdf_data:
+        with col1:
+            st.download_button(
+                label="📥 Birleştirilmiş PDF İndir",
+                data=st.session_state.pdf_data,
+                file_name="BIRLESTIRILMIS_FATURALAR.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+    if st.session_state.excel_data:
+        with col2:
+            st.download_button(
+                label="📊 Excel Listesi İndir",
+                data=st.session_state.excel_data,
+                file_name="FATURA_LISTESI.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
 st.markdown("---")
 st.caption("Güvenlik Notu: Yüklenen tüm faturalar ve oluşturulan dosyalar, işlem biter bitmez sunucudan kalıcı olarak silinir.")
