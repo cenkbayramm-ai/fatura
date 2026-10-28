@@ -72,7 +72,7 @@ def faturanin_tarihini_bul(xml_path):
     except Exception:
         return "9999-99-99 00:00:00"
 
-# --- EXCEL İÇİN GELİŞMİŞ VERİ AYIKLAMA FONKSİYONU ---
+# --- EXCEL İÇİN VERİ AYIKLAMA FONKSİYONU ---
 def fatura_verilerini_ayikla(xml_path):
     try:
         with open(xml_path, 'rb') as f:
@@ -80,60 +80,71 @@ def fatura_verilerini_ayikla(xml_path):
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
         
-        # Namespace bağımsız arama fonksiyonu (Ön ek fark etmeksizin tag ismine bakar)
         def get_text_by_tag_name(tag_name, parent=None):
             xpath = f".//*[local-name()='{tag_name}']"
             elements = (parent if parent is not None else tree).xpath(xpath)
             return elements[0].text.strip() if elements and elements[0].text else ""
 
-        # Temel Bilgiler
-        tarih = get_text_by_tag_name('IssueDate')
+        # Tarih Formatı (GG.AA.YYYY)
+        tarih_xml = get_text_by_tag_name('IssueDate')
+        tarih = ""
+        if tarih_xml and re.match(r'\d{4}-\d{2}-\d{2}', tarih_xml):
+            y, m, d = tarih_xml.split('-')
+            tarih = f"{d}.{m}.{y}"
+
         fatura_no = get_text_by_tag_name('ID')
         fatura_turu = get_text_by_tag_name('InvoiceTypeCode') or "SATIS"
         
-        # Alıcı VKN
         vkn = ""
         customer_party = tree.xpath(".//*[local-name()='AccountingCustomerParty']")
         if customer_party:
             vkn = get_text_by_tag_name('CompanyID', customer_party[0]) or get_text_by_tag_name('ID', customer_party[0])
         
-        # Açıklama (İlk bulunan ürün/hizmet açıklaması veya genel açıklama)
         aciklama = get_text_by_tag_name('Name')
         if not aciklama:
             aciklama = get_text_by_tag_name('Note')
             
-        # Toplamlar
-        kdv_toplam = get_text_by_tag_name('TaxAmount')
+        tevkifat_orani = ""
+        ozel_matrah = ""
         genel_toplam = get_text_by_tag_name('PayableAmount')
         
-        # KDV Matrah ve Oranları (Dinamik)
-        kdv_dict = {}
-        # TaxSubtotal düğümlerini bul
+        # Standart KDV Sözlüğü (İstenilen sütun isimleriyle)
+        kdv_dict = {
+            "%1'lik KDV": None, "%8'lik KDV": None, "%10'lik KDV": None, "%18'lik KDV": None, "%20'lik KDV": None,
+            "%1'lik Matrah": None, "%8'lik Matrah": None, "%10'lik Matrah": None, "%18'lik Matrah": None, "%20'lik Matrah": None
+        }
+        
         tax_subtotals = tree.xpath(".//*[local-name()='TaxSubtotal']")
         for subtotal in tax_subtotals:
+            tax_code = get_text_by_tag_name('TaxTypeCode', subtotal)
             oran = get_text_by_tag_name('Percent', subtotal)
             matrah = get_text_by_tag_name('TaxableAmount', subtotal)
             vergi = get_text_by_tag_name('TaxAmount', subtotal)
             
+            # Tevkifat Oranı Çekme
+            if tax_code and '9015' in tax_code:
+                tevkifat_orani = oran
+                continue # Tevkifat matrahı, genel KDV listesine eklenmesin
+                
             if oran and matrah:
                 try:
                     oran_int = int(float(oran))
                     kdv_dict[f"%{oran_int}'lik KDV"] = float(vergi) if vergi else 0.0
                     kdv_dict[f"%{oran_int}'lik Matrah"] = float(matrah)
-                except:
-                    pass
+                except: pass
                     
         return {
             "Fatura Tarihi": tarih,
             "Fatura Numarası": fatura_no,
             "Fatura Türü": fatura_turu,
-            "VKN/TCKN": str(vkn).replace('.0', '') if vkn else "",
+            "VKN TCKN": str(vkn).replace('.0', '') if vkn else "",
             "Açıklama": aciklama,
-            "Toplam KDV": float(kdv_toplam) if kdv_toplam else 0.0,
-            "Genel Toplam": float(genel_toplam) if genel_toplam else 0.0,
-            **kdv_dict
+            "Tevkifat Oranı": tevkifat_orani,
+            "Özel Matrah": ozel_matrah,
+            **kdv_dict,
+            "Toplam": float(genel_toplam) if genel_toplam else 0.0
         }
-    except Exception as e:
+    except Exception:
         return None
 
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path=None):
@@ -332,6 +343,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
     except Exception as e:
         return False, f"Teknik Hata: {str(e)}"
 
+
 # Session state başlatma (Butonların kaybolmasını önlemek için)
 if 'pdf_data' not in st.session_state:
     st.session_state.pdf_data = None
@@ -341,6 +353,8 @@ if 'islem_tamamlandi' not in st.session_state:
     st.session_state.islem_tamamlandi = False
 if 'basarili_sayisi' not in st.session_state:
     st.session_state.basarili_sayisi = 0
+if 'basarisiz_sayisi' not in st.session_state:
+    st.session_state.basarisiz_sayisi = 0
 if 'hata_loglari' not in st.session_state:
     st.session_state.hata_loglari = []
 
@@ -354,11 +368,12 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
     if not uploaded_files:
         st.warning("Lütfen en az bir dosya yükleyin.")
     else:
-        # Önceki işlem verilerini temizle
+        # Önceki işlem verilerini sıfırla
         st.session_state.pdf_data = None
         st.session_state.excel_data = None
         st.session_state.islem_tamamlandi = False
         st.session_state.basarili_sayisi = 0
+        st.session_state.basarisiz_sayisi = 0
         st.session_state.hata_loglari = []
 
         with st.spinner('Motor hazırlanıyor ve faturalar işleniyor, lütfen bekleyin...'):
@@ -420,30 +435,33 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                             excel_verileri.append(fatura_data)
                             
                     if basarili_sayisi > 0 or excel_verileri:
-                        final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS_FATURALAR.pdf")
-                        if os.path.exists(final_pdf_yolu):
+                        # PDF Birleştirme ve Kaydetme
+                        if basarili_sayisi > 0:
+                            final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS_FATURALAR.pdf")
                             merger.write(final_pdf_yolu)
+                            with open(final_pdf_yolu, "rb") as pdf_file:
+                                st.session_state.pdf_data = pdf_file.read()
                         merger.close()
                         
                         # --- EXCEL OLUŞTURMA VE BOŞ SÜTUNLARI TEMİZLEME ---
                         if excel_verileri:
                             df = pd.DataFrame(excel_verileri)
                             
-                            # Tamamen boş olan sütunları bul ve at
+                            # Tamamen boş (None veya boş string) olan sütunları bul ve at
                             df = df.dropna(axis=1, how='all')
                             for col in df.columns:
                                 if df[col].astype(str).str.strip().eq('').all() or df[col].astype(str).eq('None').all():
                                     df = df.drop(columns=[col])
                                     
-                            # Sütun sıralamasını düzenle
-                            oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN/TCKN", "Açıklama"]
-                            diger_sutunlar = [c for c in df.columns if c not in oncelikli_sutunlar]
+                            # Sütun sıralamasını istenilen formata göre düzenle
+                            oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN TCKN", "Açıklama", "Tevkifat Oranı", "Özel Matrah"]
+                            diger_sutunlar = [c for c in df.columns if c not in oncelikli_sutunlar and c != "Toplam"]
                             
-                            kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c and 'Matrah' not in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                            # KDV ve Matrah Sütunlarını Rakanlarına Göre Sırala
+                            kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
                             matrah_sutunlari = sorted([c for c in diger_sutunlar if 'Matrah' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
-                            kalan_sutunlar = [c for c in diger_sutunlar if c not in kdv_sutunlari and c not in matrah_sutunlari and c not in ["Toplam KDV", "Genel Toplam"]]
                             
-                            son_sutunlar = oncelikli_sutunlar + kdv_sutunlari + matrah_sutunlari + kalan_sutunlar + ["Toplam KDV", "Genel Toplam"]
+                            son_sutunlar = oncelikli_sutunlar + kdv_sutunlari + matrah_sutunlari + ["Toplam"]
                             df = df[[c for c in son_sutunlar if c in df.columns]]
                             
                             # Excel dosyasını belleğe yaz
@@ -454,10 +472,6 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                             # Verileri Session State'e kaydet
                             with open(excel_cikti_yolu, "rb") as excel_file:
                                 st.session_state.excel_data = excel_file.read()
-                        
-                        if os.path.exists(final_pdf_yolu) and os.path.getsize(final_pdf_yolu) > 10:
-                            with open(final_pdf_yolu, "rb") as pdf_file:
-                                st.session_state.pdf_data = pdf_file.read()
 
                         st.session_state.basarili_sayisi = basarili_sayisi
                         st.session_state.basarisiz_sayisi = basarisiz_sayisi
