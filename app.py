@@ -6,9 +6,24 @@ import shutil
 import base64
 import zipfile
 import tempfile
+import subprocess
 from lxml import etree
 import pdfkit
 from pypdf import PdfMerger
+
+# --- LINUX İÇİN PDF MOTORUNU OTOMATİK KURMA SİSTEMİ ---
+# Sunucuda PDF motoru yoksa GitHub üzerinden Linux versiyonunu indirir
+WK_DIR = os.path.join(os.getcwd(), "wkhtmltox")
+WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
+
+if not os.path.exists(WK_PATH):
+    try:
+        subprocess.run(["wget", "https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.4/wkhtmltox-0.12.4_linux-generic-amd64.tar.xz"], check=True)
+        subprocess.run(["tar", "xvf", "wkhtmltox-0.12.4_linux-generic-amd64.tar.xz"], check=True)
+        subprocess.run(["chmod", "+x", WK_PATH], check=True)
+    except Exception as e:
+        print("Motor indirme hatası:", e)
+# ------------------------------------------------------
 
 st.set_page_config(page_title="E-Fatura PDF Çevirici", page_icon="📄", layout="centered")
 
@@ -31,7 +46,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
-        # İç içe gömülü XSLT arama
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -90,9 +104,10 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         transform = etree.XSLT(xslt_root)
         html_dom = transform(tree)
         
-        # Sunucu (Linux) WKHTMLTOPDF ayarları
+        # Sunucudaki özel motor yolunu göster
+        config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
         options = {'page-size': 'A4', 'encoding': "UTF-8", 'no-outline': None, 'quiet': ''}
-        pdfkit.from_string(str(html_dom), output_pdf_path, options=options)
+        pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
         return os.path.exists(output_pdf_path) and os.path.getsize(output_pdf_path) > 10
     except Exception:
@@ -108,7 +123,7 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
     if not uploaded_files:
         st.warning("Lütfen en az bir dosya yükleyin.")
     else:
-        with st.spinner('Faturalar işleniyor, lütfen bekleyin...'):
+        with st.spinner('Motor hazırlanıyor ve faturalar işleniyor, lütfen bekleyin...'):
             with tempfile.TemporaryDirectory() as work_dir:
                 xml_dosyalari = []
                 
@@ -140,7 +155,6 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     basarili_sayisi = 0
                     basarisiz_sayisi = 0
                     
-                    # Eğer GitHub'da sablon.xslt varsa onu kullanır
                     varsayilan_sablon = "sablon.xslt" if os.path.exists("sablon.xslt") else None
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
