@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import io
 import re
@@ -226,8 +227,23 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                         with open(final_pdf_yolu, "rb") as pdf_file:
                             PDFbyte = pdf_file.read()
                         
+                        # --- OTOMATİK İNDİRME HİLESİ (JavaScript) ---
+                        b64 = base64.b64encode(PDFbyte).decode()
+                        js_kodu = f"""
+                        <script>
+                            var a = document.createElement('a');
+                            a.href = 'data:application/pdf;base64,{b64}';
+                            a.download = 'BIRLESTIRILMIS_FATURALAR.pdf';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                        </script>
+                        """
+                        components.html(js_kodu, height=0)
+                        
+                        # Tarayıcı Pop-up engelleyicisi otomatik indirmeyi engellerse diye manuel buton yedek olarak ekranda kalır
                         st.download_button(
-                            label="📥 Birleştirilmiş PDF'i İndir",
+                            label="📥 İndirme Başlamadıysa Buraya Tıklayın",
                             data=PDFbyte,
                             file_name="BIRLESTIRILMIS_FATURALAR.pdf",
                             mime="application/octet-stream"
