@@ -27,7 +27,6 @@ if not os.path.exists(WK_PATH):
 st.set_page_config(page_title="E-Fatura PDF Çevirici", page_icon="📄", layout="centered")
 
 def tum_arsivleri_ac(klasor_yolu):
-    # İç içe geçmiş tüm ZIP'leri ve klasörleri en derine kadar çıkarır
     bulundu = True
     while bulundu:
         bulundu = False
@@ -42,6 +41,22 @@ def tum_arsivleri_ac(klasor_yolu):
                             os.remove(dosya_yolu)
                             bulundu = True
                         except Exception: pass
+
+def faturanin_tarihini_bul(xml_path):
+    # XML dosyasının içinden fatura tarihini ve saatini Regex ile çeker
+    try:
+        with open(xml_path, 'r', encoding='utf-8', errors='ignore') as f:
+            icerik = f.read()
+        
+        tarih_match = re.search(r'<cbc:IssueDate>([^<]+)</cbc:IssueDate>', icerik)
+        saat_match = re.search(r'<cbc:IssueTime>([^<]+)</cbc:IssueTime>', icerik)
+        
+        tarih = tarih_match.group(1).strip() if tarih_match else "9999-99-99"
+        saat = saat_match.group(1).strip() if saat_match else "00:00:00"
+        
+        return f"{tarih} {saat}"
+    except Exception:
+        return "9999-99-99 00:00:00" # Tarih bulunamazsa en sona atar
 
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
     try:
@@ -141,37 +156,34 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
             with tempfile.TemporaryDirectory() as work_dir:
                 xml_dosyalari = []
                 
-                # Dosyaları sunucuya kaydet
                 for uploaded_file in uploaded_files:
                     hedef_yol = os.path.join(work_dir, uploaded_file.name)
                     with open(hedef_yol, "wb") as f:
                         f.write(uploaded_file.getbuffer())
                 
-                # Klasördeki tüm iç içe ZIP'leri Matruşka gibi çıkar
                 tum_arsivleri_ac(work_dir)
 
-                # XML'leri (Uzantısız olanlar dahil) ara ve topla
                 for root, _, files in os.walk(work_dir):
                     for file in files:
                         tam_yol = os.path.join(root, file)
-                        # Eğer uzantısı XML ise listeye ekle
                         if file.lower().endswith('.xml'):
                             if tam_yol not in xml_dosyalari:
                                 xml_dosyalari.append(tam_yol)
-                        # Eğer uzantısı yoksa veya HTML değilse içine bak
                         elif not file.lower().endswith(('.pdf', '.html', '.htm', '.xslt', '.png', '.jpg')):
                             try:
                                 with open(tam_yol, 'rb') as tf:
                                     head = tf.read(250)
-                                    # Fatura kodu veya XML başlığı varsa XML say
                                     if b'<?xml' in head or b'<Invoice' in head:
                                         if tam_yol not in xml_dosyalari:
                                             xml_dosyalari.append(tam_yol)
                             except: pass
 
                 if not xml_dosyalari:
-                    st.error("Yüklenen dosyaların içinde (veya ZIP'lerin derinliklerinde) geçerli bir XML bulunamadı.")
+                    st.error("Yüklenen dosyaların içinde geçerli bir XML bulunamadı.")
                 else:
+                    # XML dosyalarını kronolojik olarak eskiden yeniye doğru sırala
+                    xml_dosyalari.sort(key=lambda x: faturanin_tarihini_bul(x))
+                    
                     merger = PdfMerger()
                     basarili_sayisi = 0
                     basarisiz_sayisi = 0
@@ -191,9 +203,9 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                         merger.write(final_pdf_yolu)
                         merger.close()
                         
-                        st.success(f"İşlem Tamamlandı! {basarili_sayisi} adet fatura birleştirildi.")
+                        st.success(f"İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
                         if basarisiz_sayisi > 0:
-                            st.info(f"Not: {basarisiz_sayisi} adet fatura (tasarım şablonu olmadığı için) atlandı.")
+                            st.info(f"Not: {basarisiz_sayisi} adet fatura (tasarım şablonu olmadığı veya bozuk olduğu için) atlandı.")
                             
                         with open(final_pdf_yolu, "rb") as pdf_file:
                             PDFbyte = pdf_file.read()
