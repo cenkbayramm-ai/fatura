@@ -100,7 +100,21 @@ def fatura_verilerini_ayikla(xml_path):
         if customer_party:
             vkn = get_text_by_tag_name('CompanyID', customer_party[0]) or get_text_by_tag_name('ID', customer_party[0])
         
-        aciklama = get_text_by_tag_name('Name')
+        # Açıklama: Doğrudan Fatura Kalemlerindeki (InvoiceLine) Ürün/Hizmet Adını Çek
+        aciklama = ""
+        invoice_lines = tree.xpath(".//*[local-name()='InvoiceLine']")
+        if invoice_lines:
+            aciklamalar = []
+            for line in invoice_lines:
+                item_name = get_text_by_tag_name('Name', line)
+                if not item_name:
+                    item_name = get_text_by_tag_name('Description', line)
+                if item_name:
+                    aciklamalar.append(item_name)
+            if aciklamalar:
+                aciklama = " | ".join(aciklamalar)
+                
+        # Eğer kalem açıklaması yoksa fatura notuna bak
         if not aciklama:
             aciklama = get_text_by_tag_name('Note')
             
@@ -457,11 +471,12 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                             oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN TCKN", "Açıklama", "Tevkifat Oranı", "Özel Matrah"]
                             diger_sutunlar = [c for c in df.columns if c not in oncelikli_sutunlar and c != "Toplam"]
                             
-                            # KDV ve Matrah Sütunlarını Rakanlarına Göre Sırala
-                            kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                            # Matrah ve KDV Sütunlarını Rakanlarına Göre Sırala
                             matrah_sutunlari = sorted([c for c in diger_sutunlar if 'Matrah' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                            kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
                             
-                            son_sutunlar = oncelikli_sutunlar + kdv_sutunlari + matrah_sutunlari + ["Toplam"]
+                            # Matrahlar Açıklamadan sonra, KDV'ler en sonda
+                            son_sutunlar = oncelikli_sutunlar + matrah_sutunlari + kdv_sutunlari + ["Toplam"]
                             df = df[[c for c in son_sutunlar if c in df.columns]]
                             
                             # Excel dosyasını belleğe yaz
