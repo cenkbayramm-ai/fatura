@@ -26,6 +26,23 @@ if not os.path.exists(WK_PATH):
 
 st.set_page_config(page_title="E-Fatura PDF Çevirici", page_icon="📄", layout="centered")
 
+def tum_arsivleri_ac(klasor_yolu):
+    # İç içe geçmiş tüm ZIP'leri ve klasörleri en derine kadar çıkarır
+    bulundu = True
+    while bulundu:
+        bulundu = False
+        for root_dir, dirs, files in os.walk(klasor_yolu):
+            for file in files:
+                dosya_yolu = os.path.join(root_dir, file)
+                if file.lower().endswith('.zip'):
+                    if zipfile.is_zipfile(dosya_yolu):
+                        try:
+                            with zipfile.ZipFile(dosya_yolu, 'r') as zip_ref:
+                                zip_ref.extractall(root_dir)
+                            os.remove(dosya_yolu)
+                            bulundu = True
+                        except Exception: pass
+
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
     try:
         with open(xml_path, 'rb') as f:
@@ -34,7 +51,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
-        # Regex SyntaxWarning hatası br (byte-raw) string ile düzeltildi
         raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
         
         esnek_parser = etree.XMLParser(recover=True)
@@ -87,7 +103,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
                     except Exception: pass
                     if xslt_content: break
 
-        # Yedek Şablon
         if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
             with open(fallback_xslt_path, 'rb') as f_sablon:
                 xslt_content = f_sablon.read()
@@ -126,29 +141,36 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
             with tempfile.TemporaryDirectory() as work_dir:
                 xml_dosyalari = []
                 
+                # Dosyaları sunucuya kaydet
                 for uploaded_file in uploaded_files:
                     hedef_yol = os.path.join(work_dir, uploaded_file.name)
                     with open(hedef_yol, "wb") as f:
                         f.write(uploaded_file.getbuffer())
-                    
-                    if uploaded_file.name.lower().endswith('.zip'):
-                        try:
-                            with zipfile.ZipFile(hedef_yol, 'r') as z:
-                                z.extractall(work_dir)
-                        except Exception:
-                            pass
-                    elif uploaded_file.name.lower().endswith('.xml'):
-                        xml_dosyalari.append(hedef_yol)
+                
+                # Klasördeki tüm iç içe ZIP'leri Matruşka gibi çıkar
+                tum_arsivleri_ac(work_dir)
 
+                # XML'leri (Uzantısız olanlar dahil) ara ve topla
                 for root, _, files in os.walk(work_dir):
                     for file in files:
+                        tam_yol = os.path.join(root, file)
+                        # Eğer uzantısı XML ise listeye ekle
                         if file.lower().endswith('.xml'):
-                            tam_yol = os.path.join(root, file)
                             if tam_yol not in xml_dosyalari:
                                 xml_dosyalari.append(tam_yol)
+                        # Eğer uzantısı yoksa veya HTML değilse içine bak
+                        elif not file.lower().endswith(('.pdf', '.html', '.htm', '.xslt', '.png', '.jpg')):
+                            try:
+                                with open(tam_yol, 'rb') as tf:
+                                    head = tf.read(250)
+                                    # Fatura kodu veya XML başlığı varsa XML say
+                                    if b'<?xml' in head or b'<Invoice' in head:
+                                        if tam_yol not in xml_dosyalari:
+                                            xml_dosyalari.append(tam_yol)
+                            except: pass
 
                 if not xml_dosyalari:
-                    st.error("Yüklenen dosyaların içinde geçerli bir XML bulunamadı.")
+                    st.error("Yüklenen dosyaların içinde (veya ZIP'lerin derinliklerinde) geçerli bir XML bulunamadı.")
                 else:
                     merger = PdfMerger()
                     basarili_sayisi = 0
