@@ -68,18 +68,6 @@ def faturanin_tarihini_bul(xml_path):
     except Exception:
         return "9999-99-99 00:00:00"
 
-class HttpsResolver(etree.Resolver):
-    def resolve(self, url, pubid, context):
-        if url.startswith('http'):
-            try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    content = response.read()
-                return self.resolve_string(content.decode('utf-8', errors='ignore'), context)
-            except Exception:
-                pass
-        return None
-
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path=None):
     try:
         with open(xml_path, 'rb') as f:
@@ -88,8 +76,11 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
+        # Firma tespiti: BİM veya Soner
         is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
+        is_soner = b'SONER' in raw_content.upper() or b'7740287383' in raw_content
             
+        # SSL ve Çökme Hatası Veren Tüm Dış Bağlantıları Şablonla Birlikte Sil
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
@@ -101,6 +92,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
+        # İç gömülü şablonu ara
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -142,38 +134,46 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                     except Exception: pass
                     if xslt_content: break
 
+        # BİM ise kendi şablonunu kullan
         if not xslt_content and is_bim and bim_xslt_path and os.path.exists(bim_xslt_path):
             with open(bim_xslt_path, 'rb') as f_bim:
                 xslt_content = f_bim.read()
+                
+        # Gömülü şablon yoksa veya SONER gibi dışarıya bağlanan bir faturaysa doğrudan güvenli yedeğe geç!
+        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+             with open(fallback_xslt_path, 'rb') as f_sablon:
+                xslt_content = f_sablon.read()
+
+        if not xslt_content:
+             return False, "Şablon bulunamadı."
 
         transform = None
         hata_mesaji = ""
         
-        xslt_parser = etree.XMLParser(recover=True)
-        xslt_parser.resolvers.add(HttpsResolver())
+        # Sıkı Ağ ve Güvenlik Filtresi
+        xslt_parser = etree.XMLParser(recover=True, no_network=True) 
         
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
             xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
+            # Tüm dış bağlantıları ve img/logo linklerini (SSL Çökmelerini) agresifçe engelle
+            xslt_str = re.sub(r'<xsl:import[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            xslt_str = re.sub(r'<xsl:include[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            xslt_str = re.sub(r'<img[^>]+src=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE) 
             xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=xslt_parser)
             return etree.XSLT(xslt_root)
 
-        if xslt_content:
-            try:
-                transform = sablon_derle(xslt_content)
-            except Exception as e:
-                hata_mesaji += f"Orijinal Şablon Hatası: {str(e)} | "
-                transform = None 
+        try:
+            transform = sablon_derle(xslt_content)
+        except Exception as e:
+            hata_mesaji += f"Şablon Derleme Hatası: {str(e)}"
+            # Eğer asıl şablon yine de çökerse, son kez standart yedeğe zorla
+            if fallback_xslt_path and os.path.exists(fallback_xslt_path):
+                 try:
+                     with open(fallback_xslt_path, 'rb') as f_sablon:
+                        transform = sablon_derle(f_sablon.read())
+                 except: pass
 
-        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-            try:
-                with open(fallback_xslt_path, 'rb') as f_sablon:
-                    fallback_content = f_sablon.read()
-                transform = sablon_derle(fallback_content)
-            except Exception as e:
-                hata_mesaji += f"Yedek Şablon Hatası: {str(e)}"
-                transform = None
-                
         if transform is None:
             return False, f"Hiçbir şablon uygulanamadı. {hata_mesaji}"
 
@@ -188,8 +188,9 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             'javascript-delay': 1000,
             'no-outline': None, 
             'quiet': '',
-            'load-error-handling': 'ignore',          # SSL/Ağ hatalarında çökmeyi engeller
-            'load-media-error-handling': 'ignore'     # Yüklenemeyen görselleri atlar
+            'load-error-handling': 'ignore',          # Ağ/SSL hatalarında atla, çökmeyi engelle
+            'load-media-error-handling': 'ignore',    # Medya hatalarında atla
+            'disable-external-links': ''              # Dış linklere gitmeyi tamamen yasakla
         }
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
