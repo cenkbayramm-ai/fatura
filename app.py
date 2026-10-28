@@ -18,7 +18,7 @@ TEMP_DIR = tempfile.gettempdir()
 WK_DIR = os.path.join(TEMP_DIR, "wkhtmltox")
 WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 
-# --- LINUX İÇİN PDF MOTORUNU TEMP KLASÖRÜNE KURMA ---
+# --- LINUX İÇİN PDF MOTORUNU TEMP KLASÖRÜNE KURMA (WGET KALDIRILDI) ---
 @st.cache_resource
 def motoru_indir():
     if not os.path.exists(WK_PATH):
@@ -33,7 +33,7 @@ except Exception as e:
     st.error(f"🚨 PDF Motoru İndirilirken Hata: {str(e)}")
 # ------------------------------------------------------
 
-st.set_page_config(page_title="E-Fatura PDF Çevirici", page_icon="📄", layout="centered")
+st.set_page_config(page_title="E-Fatura Toplu PDF Dönüştürücü", page_icon="📄", layout="centered")
 
 def tum_arsivleri_ac(klasor_yolu):
     bulundu = True
@@ -71,9 +71,12 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
+        # --- BİM VEYA BENZERİ DIŞ LİNKLERİ SİLME İŞLEMİ ---
+        raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
         
-        esnek_parser = etree.XMLParser(recover=True)
+        # İnternet erişimini kapatarak ayrıştır (Dışarıya bağlanmayı tamamen engeller)
+        esnek_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=esnek_parser)
         
         xslt_content = None
@@ -241,7 +244,6 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                         """
                         components.html(js_kodu, height=0)
                         
-                        # Tarayıcı Pop-up engelleyicisi otomatik indirmeyi engellerse diye manuel buton yedek olarak ekranda kalır
                         st.download_button(
                             label="📥 İndirme Başlamadıysa Buraya Tıklayın",
                             data=PDFbyte,
