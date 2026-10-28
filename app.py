@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import os
 import io
 import re
@@ -18,7 +17,7 @@ TEMP_DIR = tempfile.gettempdir()
 WK_DIR = os.path.join(TEMP_DIR, "wkhtmltox")
 WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 
-# --- LINUX İÇİN PDF MOTORUNU TEMP KLASÖRÜNE KURMA (WGET KALDIRILDI) ---
+# --- LINUX İÇİN PDF MOTORUNU TEMP KLASÖRÜNE KURMA ---
 @st.cache_resource
 def motoru_indir():
     if not os.path.exists(WK_PATH):
@@ -71,11 +70,11 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
-        # --- BİM VEYA BENZERİ DIŞ LİNKLERİ SİLME İŞLEMİ ---
+        # Ön temizlik
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
         
-        # İnternet erişimini kapatarak ayrıştır (Dışarıya bağlanmayı tamamen engeller)
+        # Ağ erişimini kapat (Dış linklere bağlanmayı zorlama)
         esnek_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=esnek_parser)
         
@@ -126,20 +125,39 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
                     except Exception: pass
                     if xslt_content: break
 
-        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-            with open(fallback_xslt_path, 'rb') as f_sablon:
-                xslt_content = f_sablon.read()
+        # --- ŞABLON DERLEME VE YEDEK SİSTEMİ ---
+        def sablon_derle(content_bytes):
+            content_str = content_bytes.decode('utf-8', errors='ignore')
+            content_str = re.sub(r'<\?xml.*\?>', '', content_str)
+            content_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', content_str)
+            content_str = content_str.replace('="/.', '="./').replace("='/.", "='./")
+            root = etree.fromstring(content_str.encode('utf-8'), parser=esnek_parser)
+            return etree.XSLT(root)
 
-        if not xslt_content:
-            return False, "Faturanın içinde XSLT tasarımı yok ve sablon.xslt dosyası da bulunamadı."
+        transform = None
+        hata_sebebi = ""
 
-        xslt_content_str = xslt_content.decode('utf-8', errors='ignore')
-        xslt_content_str = re.sub(r'<\?xml.*\?>', '', xslt_content_str)
-        xslt_content_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', xslt_content_str)
-        xslt_content_str = xslt_content_str.replace('="/.', '="./').replace("='/.", "='./")
+        # 1. Aşama: Faturanın kendi tasarımını dene (BİM linki vb. burada patlayabilir)
+        if xslt_content:
+            try:
+                transform = sablon_derle(xslt_content)
+            except Exception as e:
+                hata_sebebi = str(e)
+                transform = None 
 
-        xslt_root = etree.fromstring(xslt_content_str.encode('utf-8'), parser=esnek_parser)
-        transform = etree.XSLT(xslt_root)
+        # 2. Aşama: Kendi tasarımı çöktüyse bizim sablon.xslt'yi devreye sok
+        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+            try:
+                with open(fallback_xslt_path, 'rb') as f_sablon:
+                    fallback_content = f_sablon.read()
+                transform = sablon_derle(fallback_content)
+            except Exception as e:
+                hata_sebebi += f" | Yedek Şablon Hatası: {str(e)}"
+                transform = None
+                
+        if transform is None:
+            return False, f"Tasarım şablonu kilitlendi veya bulunamadı. Detay: {hata_sebebi}"
+
         html_dom = transform(tree)
         
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
@@ -147,7 +165,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
         if not os.path.exists(output_pdf_path) or os.path.getsize(output_pdf_path) < 10:
-            return False, "PDF dosyası fiziksel olarak oluşturulamadı (boyut çok küçük)."
+            return False, "PDF dosyası fiziksel olarak oluşturulamadı."
             
         return True, ""
     except Exception as e:
@@ -200,8 +218,6 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     hata_loglari = []
                     
                     varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
-                    if not os.path.exists(varsayilan_sablon):
-                        st.warning("⚠️ 'sablon.xslt' dosyası GitHub klasöründe bulunamadı! Lütfen dosya adının tam olarak 'sablon.xslt' olduğundan emin olun.")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
@@ -230,22 +246,8 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                         with open(final_pdf_yolu, "rb") as pdf_file:
                             PDFbyte = pdf_file.read()
                         
-                        # --- OTOMATİK İNDİRME HİLESİ (JavaScript) ---
-                        b64 = base64.b64encode(PDFbyte).decode()
-                        js_kodu = f"""
-                        <script>
-                            var a = document.createElement('a');
-                            a.href = 'data:application/pdf;base64,{b64}';
-                            a.download = 'BIRLESTIRILMIS_FATURALAR.pdf';
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                        </script>
-                        """
-                        components.html(js_kodu, height=0)
-                        
                         st.download_button(
-                            label="📥 İndirme Başlamadıysa Buraya Tıklayın",
+                            label="📥 Birleştirilmiş PDF'i İndir",
                             data=PDFbyte,
                             file_name="BIRLESTIRILMIS_FATURALAR.pdf",
                             mime="application/octet-stream"
