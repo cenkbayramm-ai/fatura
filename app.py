@@ -8,6 +8,7 @@ import zipfile
 import tempfile
 import subprocess
 import urllib.request
+import urllib.parse
 from lxml import etree
 import pdfkit
 from PyPDF2 import PdfMerger
@@ -77,7 +78,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             raw_content = raw_content[3:]
             
         is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
-        is_soner = b'SONER' in raw_content.upper() or b'7740287383' in raw_content
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         
@@ -90,6 +90,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
+        # Gömülü şablonu al
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -131,20 +132,12 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                     except Exception: pass
                     if xslt_content: break
 
-        # BİM veya SONER faturalarını doğrudan KAREKODLU gelişmiş şablona yönlendir
-        if not xslt_content and (is_bim or is_soner) and bim_xslt_path and os.path.exists(bim_xslt_path):
+        # BİM ise
+        if not xslt_content and is_bim and bim_xslt_path and os.path.exists(bim_xslt_path):
             with open(bim_xslt_path, 'rb') as f_bim:
                 xslt_content = f_bim.read()
-                
-        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-             with open(fallback_xslt_path, 'rb') as f_sablon:
-                xslt_content = f_sablon.read()
-
-        if not xslt_content:
-             return False, "Şablon bulunamadı."
 
         transform = None
-        
         xslt_parser = etree.XMLParser(recover=True, no_network=True)
         
         def sablon_derle(content_bytes):
@@ -152,26 +145,49 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
             xslt_str = re.sub(r'<xsl:import[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
             xslt_str = re.sub(r'<xsl:include[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
-            xslt_str = re.sub(r'<img[^>]+src=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE) 
             xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=xslt_parser)
             return etree.XSLT(xslt_root)
 
-        try:
-            transform = sablon_derle(xslt_content)
-        except Exception:
-            if fallback_xslt_path and os.path.exists(fallback_xslt_path):
-                 try:
-                     with open(fallback_xslt_path, 'rb') as f_sablon:
-                        transform = sablon_derle(f_sablon.read())
-                 except: pass
+        if xslt_content:
+            try:
+                transform = sablon_derle(xslt_content)
+            except Exception:
+                transform = None 
 
+        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+            try:
+                with open(fallback_xslt_path, 'rb') as f_sablon:
+                    transform = sablon_derle(f_sablon.read())
+            except Exception:
+                transform = None
+                
         if transform is None:
-            return False, "Hiçbir şablon uygulanamadı."
+            return False, "Şablon kilitlendi."
 
+        # XSLT ile HTML kodunu üret
         html_dom = transform(tree)
         html_str = str(html_dom)
         
-        html_str = re.sub(r'src=["\']https?://[^"\']+["\']', 'src=""', html_str, flags=re.IGNORECASE)
+        # --- ÖZEL KAREKOD VE LOGO İNDİRİCİ ---
+        # HTML içindeki bütün dış bağlantılı (http/https) resimleri bulur
+        dis_resimler = re.findall(r'src=["\'](https?://[^"\']+)["\']', html_str, flags=re.IGNORECASE)
+        for resim_url in dis_resimler:
+            try:
+                # URL içindeki özel karakterleri (Soner QR kodundaki süslü parantezler gibi) onar
+                safe_url = urllib.parse.quote(resim_url.replace('&quot;', '"'), safe=":/&?=")
+                req = urllib.request.Request(safe_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    img_data = response.read()
+                    
+                # Resmi indirip Base64 formatına çevir ve HTML'in içine kalıcı olarak göm
+                b64_img = base64.b64encode(img_data).decode('utf-8')
+                yeni_src = f"data:image/png;base64,{b64_img}"
+                html_str = html_str.replace(resim_url, yeni_src)
+            except Exception:
+                # İnternetten inmezse motor çökmesin diye boş bırak
+                html_str = html_str.replace(resim_url, "")
+
+        # Kötü huylu dış css dosyalarını temizle (Çökmeye sebep olan diğer faktör)
         html_str = re.sub(r'href=["\']https?://[^"\']+\.css["\']', 'href=""', html_str, flags=re.IGNORECASE)
         
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
@@ -184,8 +200,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             'no-outline': None, 
             'quiet': '',
             'load-error-handling': 'ignore',
-            'load-media-error-handling': 'ignore',
-            'disable-external-links': ''
+            'load-media-error-handling': 'ignore'
         }
         
         try:
@@ -198,7 +213,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                     html_str_yedek = re.sub(r'src=["\']https?://[^"\']+["\']', 'src=""', html_str_yedek, flags=re.IGNORECASE)
                     pdfkit.from_string(html_str_yedek, output_pdf_path, configuration=config, options=options)
             else:
-                return False, "PDF Motoru çöktü ve sablon.xslt bulunamadı."
+                return False, "PDF Motoru çöktü."
         
         if not os.path.exists(output_pdf_path) or os.path.getsize(output_pdf_path) < 10:
             return False, "PDF dosyası fiziksel olarak oluşturulamadı."
