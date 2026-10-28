@@ -11,10 +11,12 @@ from lxml import etree
 import pdfkit
 from PyPDF2 import PdfMerger
 
-# --- LINUX İÇİN PDF MOTORUNU OTOMATİK KURMA SİSTEMİ ---
-WK_DIR = os.path.join(os.getcwd(), "wkhtmltox")
+# --- YOL AYARLARI (Garantili Dosya Bulma) ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WK_DIR = os.path.join(BASE_DIR, "wkhtmltox")
 WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 
+# --- LINUX İÇİN PDF MOTORUNU OTOMATİK KURMA SİSTEMİ ---
 if not os.path.exists(WK_PATH):
     try:
         subprocess.run(["wget", "https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.4/wkhtmltox-0.12.4_linux-generic-amd64.tar.xz"], check=True)
@@ -43,20 +45,16 @@ def tum_arsivleri_ac(klasor_yolu):
                         except Exception: pass
 
 def faturanin_tarihini_bul(xml_path):
-    # XML dosyasının içinden fatura tarihini ve saatini Regex ile çeker
     try:
         with open(xml_path, 'r', encoding='utf-8', errors='ignore') as f:
             icerik = f.read()
-        
         tarih_match = re.search(r'<cbc:IssueDate>([^<]+)</cbc:IssueDate>', icerik)
         saat_match = re.search(r'<cbc:IssueTime>([^<]+)</cbc:IssueTime>', icerik)
-        
         tarih = tarih_match.group(1).strip() if tarih_match else "9999-99-99"
         saat = saat_match.group(1).strip() if saat_match else "00:00:00"
-        
         return f"{tarih} {saat}"
     except Exception:
-        return "9999-99-99 00:00:00" # Tarih bulunamazsa en sona atar
+        return "9999-99-99 00:00:00"
 
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
     try:
@@ -123,7 +121,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
                 xslt_content = f_sablon.read()
 
         if not xslt_content:
-            return False
+            return False, "Faturanın içinde XSLT tasarımı yok ve sablon.xslt dosyası da bulunamadı."
 
         xslt_content_str = xslt_content.decode('utf-8', errors='ignore')
         xslt_content_str = re.sub(r'<\?xml.*\?>', '', xslt_content_str)
@@ -138,13 +136,16 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         options = {'page-size': 'A4', 'encoding': "UTF-8", 'no-outline': None, 'quiet': ''}
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
-        return os.path.exists(output_pdf_path) and os.path.getsize(output_pdf_path) > 10
-    except Exception:
-        return False
+        if not os.path.exists(output_pdf_path) or os.path.getsize(output_pdf_path) < 10:
+            return False, "PDF dosyası fiziksel olarak oluşturulamadı (boyut çok küçük)."
+            
+        return True, ""
+    except Exception as e:
+        return False, f"Teknik Hata: {str(e)}"
 
 # ----- WEB ARAYÜZÜ -----
 st.title("🚀 E-Fatura Toplu PDF Dönüştürücü")
-st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini tek bir PDF olarak size sunacaktır.")
+st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini **tarih sırasına göre** tek bir PDF olarak size sunacaktır.")
 
 uploaded_files = st.file_uploader("XML veya ZIP Dosyalarını Seçin", accept_multiple_files=True, type=['xml', 'zip'])
 
@@ -187,25 +188,36 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     merger = PdfMerger()
                     basarili_sayisi = 0
                     basarisiz_sayisi = 0
+                    hata_loglari = []
                     
-                    varsayilan_sablon = "sablon.xslt" if os.path.exists("sablon.xslt") else None
+                    # Sabit Yollu Şablon Çağrısı
+                    varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
+                    if not os.path.exists(varsayilan_sablon):
+                        st.warning("⚠️ 'sablon.xslt' dosyası GitHub klasöründe bulunamadı! Lütfen dosya adının tam olarak 'sablon.xslt' olduğundan emin olun.")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
-                        if xml_to_pdf(xml_yol, pdf_cikti, fallback_xslt_path=varsayilan_sablon):
+                        basarili_mi, hata_mesaji = xml_to_pdf(xml_yol, pdf_cikti, fallback_xslt_path=varsayilan_sablon)
+                        
+                        if basarili_mi:
                             merger.append(pdf_cikti)
                             basarili_sayisi += 1
                         else:
                             basarisiz_sayisi += 1
+                            hata_loglari.append(f"Fatura ({os.path.basename(xml_yol)}): {hata_mesaji}")
                             
                     if basarili_sayisi > 0:
                         final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS_FATURALAR.pdf")
                         merger.write(final_pdf_yolu)
                         merger.close()
                         
-                        st.success(f"İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
+                        st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
+                        
                         if basarisiz_sayisi > 0:
-                            st.info(f"Not: {basarisiz_sayisi} adet fatura (tasarım şablonu olmadığı veya bozuk olduğu için) atlandı.")
+                            st.info(f"Not: {basarisiz_sayisi} adet fatura sorunlu olduğu için atlandı.")
+                            with st.expander("Hata Detaylarını Görmek İçin Tıklayın"):
+                                for log in hata_loglari:
+                                    st.write(log)
                             
                         with open(final_pdf_yolu, "rb") as pdf_file:
                             PDFbyte = pdf_file.read()
@@ -217,7 +229,9 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                             mime="application/octet-stream"
                         )
                     else:
-                        st.error("Hiçbir fatura dönüştürülemedi. Dosyalar bozuk veya şablon barındırmıyor olabilir.")
+                        st.error("Hiçbir fatura dönüştürülemedi. Lütfen aşağıdaki hata raporunu bana kopyalayıp gönderin:")
+                        for log in hata_loglari:
+                            st.error(log)
 
 st.markdown("---")
 st.caption("Güvenlik Notu: Yüklenen tüm faturalar ve oluşturulan PDF'ler, işlem biter bitmez sunucudan kalıcı olarak silinir.")
