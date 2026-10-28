@@ -85,7 +85,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
         
-        # --- AKILLI KÜSURAT TEMİZLİĞİ (BAŞARIYLA ÇALIŞAN KISIM) ---
+        # --- AKILLI KÜSURAT TEMİZLİĞİ ---
         for elem in tree.iter():
             if elem.text and type(elem.tag) == str:
                 tag_name = etree.QName(elem).localname
@@ -105,12 +105,15 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                         except Exception:
                             pass
         
-        xslt_content = None
+        # Faturanın ETTN (UUID) numarasını ve VKN'sini güvenli şekilde XML'den çekelim
         namespaces = {
             'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2',
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
+        uuid_node = tree.find('.//cbc:UUID', namespaces)
+        fatura_uuid = uuid_node.text.strip() if uuid_node is not None and uuid_node.text else ""
 
+        xslt_content = None
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -152,7 +155,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                     except Exception: pass
                     if xslt_content: break
 
-        # BİM ise kendi şablonunu kullan
         if not xslt_content and is_bim and bim_xslt_path and os.path.exists(bim_xslt_path):
             with open(bim_xslt_path, 'rb') as f_bim:
                 xslt_content = f_bim.read()
@@ -170,7 +172,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
             xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
-            # İnternete çıkarak sistemi çökerten gizli linkleri keser
             xslt_str = re.sub(r'<xsl:import[^>]+href=["\']https?://[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
             xslt_str = re.sub(r'<xsl:include[^>]+href=["\']https?://[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
             
@@ -196,59 +197,41 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         html_dom = transform(tree)
         html_str = str(html_dom)
         
-        # --- ÜÇLÜ YEDEKLİ KAREKOD AVCISI (GARANTİLİ) ---
+        # --- KUSURSUZ GÖRSEL VE RESMİ GİB KAREKOD OLUŞTURUCU ---
         def resim_indirici(match):
             full_tag = match.group(0)
             resim_url = match.group(1)
             
             try:
-                # Sovos (Soner İletişim vb.) QR Kod ise
-                if 'qr.sovostr.com/qr?data=' in resim_url:
-                    qr_data = resim_url.split('data=', 1)[-1]
-                    raw_str = html.unescape(urllib.parse.unquote(qr_data))
-                    safe_data = urllib.parse.quote(raw_str)
-                    
-                    # 3 Farklı Karekod Motoru Denenir
-                    apis = [
-                        f"https://api.qrserver.com/v1/create-qr-code/?size=110x110&data={safe_data}",
-                        f"https://quickchart.io/qr?size=110&text={safe_data}",
-                        f"http://chart.googleapis.com/chart?chs=110x110&cht=qr&chl={safe_data}&choe=UTF-8"
-                    ]
-                    
-                    b64_img = None
-                    for api_url in apis:
-                        try:
-                            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
-                            with urllib.request.urlopen(req, timeout=3) as response:
-                                if response.status == 200:
-                                    b64_img = base64.b64encode(response.read()).decode('utf-8')
-                                    break # Başarıyla indirilirse diğer API'leri aramayı bırak
-                        except Exception:
-                            continue
-                    
-                    # Başarıyla indirildiyse faturaya göm
-                    if b64_img:
-                        yeni_src = f"data:image/png;base64,{b64_img}"
-                        return f'<img src="{yeni_src}" style="width: 110px; height: 110px;" alt="QR Code" align="right" />'
+                # Eğer fatura Soner vb. özel entegratör QR kodu içeriyorsa
+                if 'qr.sovostr.com/qr?data=' in resim_url or fatura_uuid:
+                    # Doğrudan faturanın resmi GİB ETTN doğrulama linkini karekoda gömelim ki telefondan okutulunca faturayı direkt açsın!
+                    if fatura_uuid:
+                        dogrulama_linki = f"https://earsivportal.efatura.gov.tr/intragrs/sorgula.jsp?ettn={fatura_uuid}"
                     else:
-                        # HİÇBİRİ İNDİREMEZSE SİLMEYECEK: PDF motoruna HTTP linki verecek (SSL Hatası verdirtmez)
-                        yedek_url = f"http://chart.googleapis.com/chart?chs=110x110&cht=qr&chl={safe_data}&choe=UTF-8"
-                        return f'<img src="{yedek_url}" style="width: 110px; height: 110px;" alt="QR Code" align="right" />'
-                
-                else:
-                    # Diğer firma logoları için
-                    hedef_url = urllib.parse.quote(resim_url, safe=":/&?=")
-                    req = urllib.request.Request(hedef_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=3) as response:
-                        img_data = response.read()
-                        
-                    ext = "png"
-                    if "jpeg" in resim_url.lower() or "jpg" in resim_url.lower(): ext = "jpeg"
-                    yeni_src = f"data:image/{ext};base64,{base64.b64encode(img_data).decode('utf-8')}"
-                    return full_tag.replace(resim_url, yeni_src)
+                        qr_data = resim_url.split('data=', 1)[-1]
+                        dogrulama_linki = html.unescape(urllib.parse.unquote(qr_data))
                     
+                    safe_data = urllib.parse.quote(dogrulama_linki)
+                    
+                    # Güvenilir API ile net ve okunaklı 110x110 QR kod oluşturalım
+                    hedef_url = f"https://api.qrserver.com/v1/create-qr-code/?size=110x110&data={safe_data}"
+                    yeni_tag_format = '<img src="{yeni_src}" style="width: 110px; height: 110px;" alt="QR Code" align="right" />'
+                else:
+                    hedef_url = urllib.parse.quote(resim_url, safe=":/&?=")
+                    yeni_tag_format = full_tag.replace(resim_url, "{yeni_src}")
+                    
+                req = urllib.request.Request(hedef_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    img_data = response.read()
+                    
+                ext = "png"
+                if "jpeg" in resim_url.lower() or "jpg" in resim_url.lower(): ext = "jpeg"
+                yeni_src = f"data:image/{ext};base64,{base64.b64encode(img_data).decode('utf-8')}"
+                
+                return yeni_tag_format.format(yeni_src=yeni_src)
+                
             except Exception:
-                # İndirmede hata olursa, ORİJİNAL etiket kalsın, PDF motoru kendisi denesin
                 return full_tag 
 
         html_str = re.sub(r'<img[^>]*?src=["\'](https?://[^"\']+)["\'][^>]*>', resim_indirici, html_str, flags=re.IGNORECASE)
@@ -271,7 +254,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             try:
                 pdfkit.from_string(html_str, output_pdf_path, configuration=config, options=options)
             except IOError as e:
-                # Orijinal tasarım başarıyla çizildiyse, ufak hataları görmezden gel
                 if not (os.path.exists(output_pdf_path) and os.path.getsize(output_pdf_path) > 10):
                     raise e
         except Exception:
@@ -356,7 +338,7 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                         merger.write(final_pdf_yolu)
                         merger.close()
                         
-                        st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
+                        st.success(f>✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
                         
                         if basarisiz_sayisi > 0:
                             st.info(f"Not: {basarisiz_sayisi} adet fatura sorunlu olduğu için atlandı.")
