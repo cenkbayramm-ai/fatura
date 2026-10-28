@@ -79,12 +79,32 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             raw_content = raw_content[3:]
             
         is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
-        is_soner = b'SONER' in raw_content.upper() or b'7740287383' in raw_content or b'QRSOVOS' in raw_content
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
+        
+        # --- KRİTİK DÜZELTME: AKILLI KÜSURAT TEMİZLİĞİ ---
+        for elem in tree.iter():
+            if elem.text and type(elem.tag) == str:
+                tag_name = etree.QName(elem).localname
+                # Yalnızca Tutar, Miktar, Fiyat ve KDV etiketlerini yuvarla (Müşteri no veya VKN gibi ID'lere dokunma)
+                if any(x in tag_name for x in ['Amount', 'Quantity', 'Price', 'Percent', 'Rate']):
+                    metin = elem.text.strip()
+                    if re.match(r'^-?\d+\.\d{3,}$', metin):
+                        try:
+                            deger = float(metin)
+                            if 'Price' in tag_name:
+                                elem.text = f"{deger:.4f}".rstrip('0').rstrip('.')
+                                if not elem.text: elem.text = "0"
+                            elif 'Quantity' in tag_name:
+                                elem.text = f"{deger:.2f}".rstrip('0').rstrip('.')
+                                if not elem.text: elem.text = "0"
+                            else:
+                                elem.text = f"{deger:.2f}"
+                        except Exception:
+                            pass
         
         xslt_content = None
         namespaces = {
@@ -133,8 +153,8 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                     except Exception: pass
                     if xslt_content: break
 
-        # BİM veya SONER için şablon ezme
-        if (is_bim or is_soner) and bim_xslt_path and os.path.exists(bim_xslt_path):
+        # SADECE Şablonu hiç bulamazsa ve firma BİM ise yedek bim_sablon.xslt kullan
+        if not xslt_content and is_bim and bim_xslt_path and os.path.exists(bim_xslt_path):
             with open(bim_xslt_path, 'rb') as f_bim:
                 xslt_content = f_bim.read()
 
@@ -151,6 +171,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
             xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
+            # İnternete çıkarak sistemi çökerten linkleri keser
             xslt_str = re.sub(r'<xsl:import[^>]+href=["\']https?://[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
             xslt_str = re.sub(r'<xsl:include[^>]+href=["\']https?://[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
             
@@ -182,19 +203,17 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             resim_url = match.group(1)
             
             try:
-                # Sovos (Soner) tarzı sorunlu karekod ise
+                # Sovos (Soner İletişim) tarzı sorunlu karekod ise Google API ile baştan oluştur
                 if 'qr.sovostr.com/qr?data=' in resim_url:
                     qr_data = resim_url.split('data=', 1)[-1]
-                    # JSON metnini düzgün çözümler
                     raw_str = html.unescape(urllib.parse.unquote(qr_data))
                     safe_data = urllib.parse.quote(raw_str)
                     
-                    # Google Charts ile profesyonel ve boyutlandırılmış kusursuz karekod oluşturur
-                    hedef_url = f"http://chart.googleapis.com/chart?chs=120x120&cht=qr&chl={safe_data}&choe=UTF-8"
-                    # Karekodu tam olması gerektiği boyutta sabitler
+                    # 110x110 piksel orijinal şık görünüm.
+                    hedef_url = f"http://chart.googleapis.com/chart?chs=110x110&cht=qr&chl={safe_data}&choe=UTF-8"
                     yeni_tag_format = '<img src="{yeni_src}" style="width: 110px; height: 110px;" alt="QR Code" />'
                 else:
-                    # Faturadaki diğer standart logolar
+                    # Faturadaki diğer firma logoları
                     hedef_url = urllib.parse.quote(resim_url, safe=":/&?=")
                     yeni_tag_format = full_tag.replace(resim_url, "{yeni_src}")
                     
@@ -209,12 +228,12 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                 return yeni_tag_format.format(yeni_src=yeni_src)
                 
             except Exception:
-                return "" # İnternetten indiremezse motor çökmesin diye sadece resmi gizler
+                return "" # Hata olursa motoru çökertmemek için resmi yoksay
 
-        # HTML'in içindeki TÜM dış resimleri (Karekod dahil) bulur ve indirip içe gömer
+        # HTML'in içindeki TÜM dış resimleri bulur ve sisteme yerleşik (Base64) olarak kaydeder
         html_str = re.sub(r'<img[^>]*?src=["\'](https?://[^"\']+)["\'][^>]*>', resim_indirici, html_str, flags=re.IGNORECASE)
 
-        # Çökmeye sebep olan dış CSS'leri etkisizleştirir
+        # Hatalı CSS kaynaklarını atla
         html_str = re.sub(r'href=["\']https?://[^"\']+\.css["\']', 'href=""', html_str, flags=re.IGNORECASE)
         
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
@@ -234,6 +253,8 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             try:
                 pdfkit.from_string(html_str, output_pdf_path, configuration=config, options=options)
             except IOError as e:
+                # Motor "resmi bulamadım" uyarısı verip Python'a hata dönse bile, 
+                # PDF başarılı şekilde oluşmuşsa bu "yalancı hatayı" bypass eder!
                 if not (os.path.exists(output_pdf_path) and os.path.getsize(output_pdf_path) > 10):
                     raise e
         except Exception:
