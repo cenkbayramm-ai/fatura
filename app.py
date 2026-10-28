@@ -102,27 +102,57 @@ def fatura_verilerini_ayikla(xml_path):
             if vkn_raw:
                 vkn = str(vkn_raw).replace('.0', '').strip()
         
-        # --- KESİN ÇÖZÜM: SADECE FATURA KALEMLERİNDEKİ AÇIKLAMAYI ÇEK ---
+        # --- KESİN ÇÖZÜM: SADECE FATURA KALEMLERİNDEKİ GERÇEK AÇIKLAMAYI ÇEK ---
         aciklama_listesi = []
         invoice_lines = tree.xpath(".//*[local-name()='InvoiceLine']")
+        
         for line in invoice_lines:
+            line_metni = ""
+            # 1. Öncelik: Item içindeki Name veya Description
             items = line.xpath(".//*[local-name()='Item']")
             for item in items:
-                # Önce Description, yoksa Name al
-                desc = get_text_by_tag_name('Description', item)
                 name = get_text_by_tag_name('Name', item)
-                
-                kalem_metni = desc if desc else name
-                if kalem_metni and kalem_metni not in aciklama_listesi:
-                    aciklama_listesi.append(kalem_metni)
-        
-        # Eğer kalemden hiç açıklama çıkmazsa, fatura notlarına bak (Çok uzun IBAN vb. metinleri es geç)
+                desc = get_text_by_tag_name('Description', item)
+                if name:
+                    line_metni = name
+                    break
+                elif desc:
+                    line_metni = desc
+                    break
+            
+            # 2. Öncelik: InvoiceLine içindeki Note
+            if not line_metni:
+                line_note = get_text_by_tag_name('Note', line)
+                if line_note:
+                    line_metni = line_note
+                    
+            # 3. Öncelik: Item içindeki SellersItemIdentification (Bazen ürün adı yerine kod yazar)
+            if not line_metni:
+                for item in items:
+                    seller_id = get_text_by_tag_name('ID', item)
+                    if seller_id:
+                        line_metni = seller_id
+                        break
+            
+            if line_metni:
+                # "Alıcı Ödemeli", "İade", "Tevkifat" gibi genel notları filtrele
+                temiz_metin = line_metni.strip()
+                istenmeyenler = ["alıcı ödemeli", "alici odemeli", "iade", "tevkifat", "alıcı ödemeli̇"]
+                if temiz_metin.lower() in istenmeyenler:
+                    continue
+                if temiz_metin not in aciklama_listesi:
+                    aciklama_listesi.append(temiz_metin)
+                    
+        # Eğer kalemlerden hiçbir şey çıkmazsa, genel Note'lara bak (yine filtreleyerek)
         if not aciklama_listesi:
             for note in tree.xpath(".//*[local-name()='Note']"):
-                if note.text and 5 < len(note.text.strip()) < 100:
-                    aciklama_listesi.append(note.text.strip())
-                    break
-                    
+                if note.text:
+                    temiz_note = note.text.strip()
+                    istenmeyenler = ["alıcı ödemeli", "alici odemeli", "iade", "tevkifat", "alıcı ödemeli̇"]
+                    if temiz_note.lower() not in istenmeyenler and len(temiz_note) > 2:
+                        aciklama_listesi.append(temiz_note)
+                        break
+                        
         aciklama = " | ".join(aciklama_listesi)
             
         tevkifat_orani = ""
