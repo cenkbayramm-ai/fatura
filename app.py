@@ -9,10 +9,9 @@ import tempfile
 import subprocess
 from lxml import etree
 import pdfkit
-from pypdf import PdfMerger
+from PyPDF2 import PdfMerger
 
 # --- LINUX İÇİN PDF MOTORUNU OTOMATİK KURMA SİSTEMİ ---
-# Sunucuda PDF motoru yoksa GitHub üzerinden Linux versiyonunu indirir
 WK_DIR = os.path.join(os.getcwd(), "wkhtmltox")
 WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 
@@ -35,7 +34,8 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
-        raw_content = re.sub(b'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
+        # Regex SyntaxWarning hatası br (byte-raw) string ile düzeltildi
+        raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
         
         esnek_parser = etree.XMLParser(recover=True)
         tree = etree.fromstring(raw_content, parser=esnek_parser)
@@ -104,7 +104,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         transform = etree.XSLT(xslt_root)
         html_dom = transform(tree)
         
-        # Sunucudaki özel motor yolunu göster
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
         options = {'page-size': 'A4', 'encoding': "UTF-8", 'no-outline': None, 'quiet': ''}
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
