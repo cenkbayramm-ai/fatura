@@ -70,7 +70,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
-        # BİM faturası mı kontrolü (BİM VKN veya dosya linkinden tanır)
         is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
@@ -85,7 +84,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
-        # 1. Önce faturanın gömülü XSLT'sini ara
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -127,26 +125,45 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                     except Exception: pass
                     if xslt_content: break
 
-        # 2. Gömülü tasarım yoksa, fatura BİM faturası mı diye bak ve yerel BİM şablonunu yükle
         if not xslt_content and is_bim and bim_xslt_path and os.path.exists(bim_xslt_path):
             with open(bim_xslt_path, 'rb') as f_bim:
                 xslt_content = f_bim.read()
 
-        # 3. Hiçbiri yoksa son çare normal standart yedek şablonu kullan
-        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-            with open(fallback_xslt_path, 'rb') as f_sablon:
-                xslt_content = f_sablon.read()
+        transform = None
+        hata_mesaji = ""
+        
+        # --- ŞABLON DERLEME VE DIŞ BAĞLANTI TEMİZLEYİCİ ---
+        def sablon_derle(content_bytes):
+            xslt_str = content_bytes.decode('utf-8', errors='ignore')
+            xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
+            # XSLT içindeki dış bağlantılı (http) import/include etiketlerini acımasızca siler
+            xslt_str = re.sub(r'<xsl:(import|include)[^>]*href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            xslt_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', xslt_str)
+            xslt_str = xslt_str.replace('="/.', '="./').replace("='/.", "='./")
+            xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=esnek_parser)
+            return etree.XSLT(xslt_root)
 
-        if not xslt_content:
-            return False, "Şablon bulunamadı."
+        # 1. Aşama: Orijinal veya BİM şablonunu dene
+        if xslt_content:
+            try:
+                transform = sablon_derle(xslt_content)
+            except Exception as e:
+                hata_mesaji += f"Orijinal Şablon Hatası: {str(e)} | "
+                transform = None 
 
-        xslt_content_str = xslt_content.decode('utf-8', errors='ignore')
-        xslt_content_str = re.sub(r'<\?xml.*\?>', '', xslt_content_str)
-        xslt_content_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', xslt_content_str)
-        xslt_content_str = xslt_content_str.replace('="/.', '="./').replace("='/.", "='./")
+        # 2. Aşama: Orijinal şablon çöktüyse hemen Yedek Şablona (sablon.xslt) geç
+        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+            try:
+                with open(fallback_xslt_path, 'rb') as f_sablon:
+                    fallback_content = f_sablon.read()
+                transform = sablon_derle(fallback_content)
+            except Exception as e:
+                hata_mesaji += f"Yedek Şablon Hatası: {str(e)}"
+                transform = None
+                
+        if transform is None:
+            return False, f"Hiçbir şablon uygulanamadı. {hata_mesaji}"
 
-        xslt_root = etree.fromstring(xslt_content_str.encode('utf-8'), parser=esnek_parser)
-        transform = etree.XSLT(xslt_root)
         html_dom = transform(tree)
         
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
@@ -216,9 +233,6 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     
                     varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
                     bim_sablon = os.path.join(BASE_DIR, "bim_sablon.xslt")
-                    
-                    if not os.path.exists(bim_sablon):
-                        st.info("💡 BİM faturalarının %100 orijinal görünmesi için GitHub klasörüne 'bim_sablon.xslt' dosyasını yükleyebilirsiniz.")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
