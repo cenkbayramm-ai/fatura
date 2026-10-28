@@ -30,8 +30,7 @@ def motoru_indir():
 try:
     motoru_indir()
 except Exception as e:
-    st.error(f"🚨 PDF Motoru İndirilirken Hata: {str(e)}")
-# ------------------------------------------------------
+    pass
 
 st.set_page_config(page_title="E-Fatura Toplu PDF Dönüştürücü", page_icon="📄", layout="centered")
 
@@ -71,14 +70,9 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
-        # 1. BİM vb. Dış Bağlantılı Orijinal Tasarım Linkini Yakala
-        xslt_url_match = re.search(br'<\?xml-stylesheet[^>]+href=["\'](https?://[^"\']+)["\']', raw_content, re.IGNORECASE)
-            
-        # Ön temizlik
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
         
-        # Ağ erişimini kapat (lxml'in iç hata vermesini engeller)
         esnek_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=esnek_parser)
         
@@ -88,7 +82,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
-        # 2. Önce faturanın içine gömülü (Base64) tasarım var mı diye bak
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -130,35 +123,33 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
                     except Exception: pass
                     if xslt_content: break
 
-        # 3. Eğer Gömülü Tasarım Yoksa, Yakaladığımız Orijinal Dış Linkten (BİM vb.) İndir
-        if not xslt_content and xslt_url_match:
-            xslt_url = xslt_url_match.group(1).decode('utf-8')
+        transform = None
+        
+        if xslt_content:
             try:
-                req = urllib.request.Request(xslt_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    xslt_content = response.read()
+                xslt_str = xslt_content.decode('utf-8', errors='ignore')
+                xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
+                xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=esnek_parser)
+                transform = etree.XSLT(xslt_root)
             except Exception:
-                pass
+                transform = None 
 
-        # 4. İnternette de bulunamadıysa son çare GitHub'daki sablon.xslt'yi kullan
-        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-            with open(fallback_xslt_path, 'rb') as f_sablon:
-                xslt_content = f_sablon.read()
+        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+            try:
+                with open(fallback_xslt_path, 'rb') as f_sablon:
+                    fallback_content = f_sablon.read()
+                fb_str = fallback_content.decode('utf-8', errors='ignore')
+                fb_str = re.sub(r'<\?xml.*\?>', '', fb_str)
+                fb_root = etree.fromstring(fb_str.encode('utf-8'), parser=esnek_parser)
+                transform = etree.XSLT(fb_root)
+            except Exception:
+                transform = None
+                
+        if transform is None:
+            return False, "Standard sablon da yuklenemedi."
 
-        if not xslt_content:
-            return False, "Fatura tasarımı bulunamadı veya indirilemedi."
-
-        # XSLT'yi derle
-        xslt_content_str = xslt_content.decode('utf-8', errors='ignore')
-        xslt_content_str = re.sub(r'<\?xml.*\?>', '', xslt_content_str)
-        xslt_content_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', xslt_content_str)
-        xslt_content_str = xslt_content_str.replace('="/.', '="./').replace("='/.", "='./")
-
-        xslt_root = etree.fromstring(xslt_content_str.encode('utf-8'), parser=esnek_parser)
-        transform = etree.XSLT(xslt_root)
         html_dom = transform(tree)
         
-        # Karekod'un (JS) ve ikonların düzgün çizilmesi için izinler açıldı
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
         options = {
             'page-size': 'A4', 
@@ -172,13 +163,12 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
         if not os.path.exists(output_pdf_path) or os.path.getsize(output_pdf_path) < 10:
-            return False, "PDF dosyası fiziksel olarak oluşturulamadı."
+            return False, "PDF olusturulamadi."
             
         return True, ""
     except Exception as e:
         return False, f"Teknik Hata: {str(e)}"
 
-# ----- WEB ARAYÜZÜ -----
 st.title("🚀 E-Fatura Toplu PDF Dönüştürücü")
 st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini **tarih sırasına göre** tek bir PDF olarak size sunacaktır.")
 
@@ -225,8 +215,6 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     hata_loglari = []
                     
                     varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
-                    if not os.path.exists(varsayilan_sablon):
-                        st.warning("⚠️ 'sablon.xslt' dosyası GitHub klasöründe bulunamadı!")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
@@ -251,7 +239,7 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                             with st.expander("Hata Detaylarını Görmek İçin Tıklayın"):
                                 for log in hata_loglari:
                                     st.write(log)
-                                
+                            
                         with open(final_pdf_yolu, "rb") as pdf_file:
                             PDFbyte = pdf_file.read()
                         
