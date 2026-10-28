@@ -131,11 +131,14 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         transform = None
         hata_mesaji = ""
         
-        # --- ŞABLON DERLEME VE DIŞ BAĞLANTI TEMİZLEYİCİ ---
+        # --- NAZİK ŞABLON DERLEYİCİ ---
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
-            xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
-            xslt_str = re.sub(r'<xsl:(import|include)[^>]*href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            
+            # Sadece dışarıdan dosya çağıran problemli kısımları sil, asıl yapıyı elleme!
+            xslt_str = re.sub(r'<xsl:import[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            xslt_str = re.sub(r'<xsl:include[^>]+href=["\']http[^"\']+["\'][^>]*?/?>', '', xslt_str, flags=re.IGNORECASE)
+            
             xslt_root = etree.fromstring(xslt_str.encode('utf-8'), parser=esnek_parser)
             return etree.XSLT(xslt_root)
 
