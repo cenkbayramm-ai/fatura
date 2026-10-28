@@ -102,35 +102,18 @@ def fatura_verilerini_ayikla(xml_path):
             if vkn_raw:
                 vkn = str(vkn_raw).replace('.0', '').strip()
         
-        # --- KESİN ÇÖZÜM: SADECE FATURA KALEMLERİNDEKİ GERÇEK AÇIKLAMAYI ÇEK (NOTLARI YOK SAY) ---
-        aciklama_listesi = []
-        invoice_lines = tree.xpath(".//*[local-name()='InvoiceLine']")
-        
-        istenmeyen_kelimeler = ["alıcı ödemeli", "alici odemeli", "iade", "tevkifat", "peşin", "ödemeli", "yurtiçi kargo", "yurtici kargo"]
-        
-        for line in invoice_lines:
-            line_metni = ""
-            items = line.xpath(".//*[local-name()='Item']")
-            for item in items:
-                name = get_text_by_tag_name('Name', item)
-                desc = get_text_by_tag_name('Description', item)
-                
-                # Önce Name, sonra Description kontrol et
-                for metin in [name, desc]:
-                    if metin:
-                        temiz_metin = metin.strip()
-                        # Eğer metin istenmeyen kelimelerden birini içermiyorsa kabul et
-                        if not any(kelime in temiz_metin.lower() for kelime in istenmeyen_kelimeler):
-                            line_metni = temiz_metin
-                            break
-                if line_metni:
-                    break
+        # --- YENİ: SATICI ÜNVANI ÇEKME ---
+        satici_unvani = ""
+        supplier_party = tree.xpath(".//*[local-name()='AccountingSupplierParty']")
+        if supplier_party:
+            # Önce PartyName içindeki Name'e bak, yoksa doğrudan Party altındaki Name'e bak
+            party_name = supplier_party[0].xpath(".//*[local-name()='PartyName']")
+            if party_name:
+                satici_unvani = get_text_by_tag_name('Name', party_name[0])
             
-            if line_metni and line_metni not in aciklama_listesi:
-                aciklama_listesi.append(line_metni)
-                    
-        aciklama = " | ".join(aciklama_listesi)
-            
+            if not satici_unvani:
+                satici_unvani = get_text_by_tag_name('Name', supplier_party[0])
+
         tevkifat_orani = ""
         ozel_matrah = ""
         genel_toplam = get_text_by_tag_name('PayableAmount')
@@ -164,7 +147,7 @@ def fatura_verilerini_ayikla(xml_path):
             "Fatura Numarası": fatura_no,
             "Fatura Türü": fatura_turu,
             "VKN TCKN": vkn,
-            "Açıklama": aciklama,
+            "Satıcı Ünvanı": satici_unvani,
             "Tevkifat Oranı": tevkifat_orani,
             "Özel Matrah": ozel_matrah,
             **kdv_dict,
@@ -480,7 +463,7 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                                     df = df.drop(columns=[col])
                                     
                             # Sütun sıralaması
-                            oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN TCKN", "Açıklama", "Tevkifat Oranı", "Özel Matrah"]
+                            oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN TCKN", "Satıcı Ünvanı", "Tevkifat Oranı", "Özel Matrah"]
                             
                             # Matrahlar ve KDV'ler için sabit sıralama listesi
                             matrah_sirasi = ["%1'lik Matrah", "%8'lik Matrah", "%10'lik Matrah", "%18'lik Matrah", "%20'lik Matrah"]
