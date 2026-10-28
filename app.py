@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import io
 import re
@@ -70,11 +71,14 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
         if raw_content.startswith(b'\xef\xbb\xbf'):
             raw_content = raw_content[3:]
             
+        # 1. BİM vb. Dış Bağlantılı Orijinal Tasarım Linkini Yakala
+        xslt_url_match = re.search(br'<\?xml-stylesheet[^>]+href=["\'](https?://[^"\']+)["\']', raw_content, re.IGNORECASE)
+            
         # Ön temizlik
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         raw_content = re.sub(br'(xmlns|xsi):schemaLocation\s*=\s*["\'][^"\']*["\']', b'', raw_content)
         
-        # Ağ erişimini kapat (Dış linklere bağlanmayı zorlama)
+        # Ağ erişimini kapat (lxml'in iç hata vermesini engeller)
         esnek_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=esnek_parser)
         
@@ -84,6 +88,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
         }
 
+        # 2. Önce faturanın içine gömülü (Base64) tasarım var mı diye bak
         for obj in tree.findall('.//cbc:EmbeddedDocumentBinaryObject', namespaces):
             if not obj.text: continue
             try:
@@ -125,43 +130,45 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None):
                     except Exception: pass
                     if xslt_content: break
 
-        # --- ŞABLON DERLEME VE YEDEK SİSTEMİ ---
-        def sablon_derle(content_bytes):
-            content_str = content_bytes.decode('utf-8', errors='ignore')
-            content_str = re.sub(r'<\?xml.*\?>', '', content_str)
-            content_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', content_str)
-            content_str = content_str.replace('="/.', '="./').replace("='/.", "='./")
-            root = etree.fromstring(content_str.encode('utf-8'), parser=esnek_parser)
-            return etree.XSLT(root)
-
-        transform = None
-        hata_sebebi = ""
-
-        # 1. Aşama: Faturanın kendi tasarımını dene (BİM linki vb. burada patlayabilir)
-        if xslt_content:
+        # 3. Eğer Gömülü Tasarım Yoksa, Yakaladığımız Orijinal Dış Linkten (BİM vb.) İndir
+        if not xslt_content and xslt_url_match:
+            xslt_url = xslt_url_match.group(1).decode('utf-8')
             try:
-                transform = sablon_derle(xslt_content)
-            except Exception as e:
-                hata_sebebi = str(e)
-                transform = None 
+                req = urllib.request.Request(xslt_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    xslt_content = response.read()
+            except Exception:
+                pass
 
-        # 2. Aşama: Kendi tasarımı çöktüyse bizim sablon.xslt'yi devreye sok
-        if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
-            try:
-                with open(fallback_xslt_path, 'rb') as f_sablon:
-                    fallback_content = f_sablon.read()
-                transform = sablon_derle(fallback_content)
-            except Exception as e:
-                hata_sebebi += f" | Yedek Şablon Hatası: {str(e)}"
-                transform = None
-                
-        if transform is None:
-            return False, f"Tasarım şablonu kilitlendi veya bulunamadı. Detay: {hata_sebebi}"
+        # 4. İnternette de bulunamadıysa son çare GitHub'daki sablon.xslt'yi kullan
+        if not xslt_content and fallback_xslt_path and os.path.exists(fallback_xslt_path):
+            with open(fallback_xslt_path, 'rb') as f_sablon:
+                xslt_content = f_sablon.read()
 
+        if not xslt_content:
+            return False, "Fatura tasarımı bulunamadı veya indirilemedi."
+
+        # XSLT'yi derle
+        xslt_content_str = xslt_content.decode('utf-8', errors='ignore')
+        xslt_content_str = re.sub(r'<\?xml.*\?>', '', xslt_content_str)
+        xslt_content_str = re.sub(r'/\.(cac|cbc|ext|ds|xades|ubl)', r'./\1', xslt_content_str)
+        xslt_content_str = xslt_content_str.replace('="/.', '="./').replace("='/.", "='./")
+
+        xslt_root = etree.fromstring(xslt_content_str.encode('utf-8'), parser=esnek_parser)
+        transform = etree.XSLT(xslt_root)
         html_dom = transform(tree)
         
+        # Karekod'un (JS) ve ikonların düzgün çizilmesi için izinler açıldı
         config = pdfkit.configuration(wkhtmltopdf=WK_PATH)
-        options = {'page-size': 'A4', 'encoding': "UTF-8", 'no-outline': None, 'quiet': ''}
+        options = {
+            'page-size': 'A4', 
+            'encoding': "UTF-8", 
+            'enable-local-file-access': "",
+            'enable-javascript': "",
+            'javascript-delay': 500,
+            'no-outline': None, 
+            'quiet': ''
+        }
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
         if not os.path.exists(output_pdf_path) or os.path.getsize(output_pdf_path) < 10:
@@ -218,6 +225,8 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     hata_loglari = []
                     
                     varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
+                    if not os.path.exists(varsayilan_sablon):
+                        st.warning("⚠️ 'sablon.xslt' dosyası GitHub klasöründe bulunamadı!")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
@@ -242,12 +251,25 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                             with st.expander("Hata Detaylarını Görmek İçin Tıklayın"):
                                 for log in hata_loglari:
                                     st.write(log)
-                            
+                                
                         with open(final_pdf_yolu, "rb") as pdf_file:
                             PDFbyte = pdf_file.read()
                         
+                        b64 = base64.b64encode(PDFbyte).decode()
+                        js_kodu = f"""
+                        <script>
+                            var a = document.createElement('a');
+                            a.href = 'data:application/pdf;base64,{b64}';
+                            a.download = 'BIRLESTIRILMIS_FATURALAR.pdf';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                        </script>
+                        """
+                        components.html(js_kodu, height=0)
+                        
                         st.download_button(
-                            label="📥 Birleştirilmiş PDF'i İndir",
+                            label="📥 İndirme Başlamadıysa Buraya Tıklayın",
                             data=PDFbyte,
                             file_name="BIRLESTIRILMIS_FATURALAR.pdf",
                             mime="application/octet-stream"
