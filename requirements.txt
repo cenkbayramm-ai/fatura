@@ -1,4 +1,4 @@
 streamlit
 lxml
 pdfkit
-pypdf
+PyPDF2
