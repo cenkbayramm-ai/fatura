@@ -24,7 +24,7 @@ WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 def motoru_indir():
     if not os.path.exists(WK_PATH):
         tar_yolu = os.path.join(TEMP_DIR, "wk.tar.xz")
-        for _ in range(3): # Hata olursa 3 kez tekrar dener
+        for _ in range(3):
             try:
                 urllib.request.urlretrieve("https://github.com/wkhtmltopdf/wkhtmltopdf/releases/download/0.12.4/wkhtmltox-0.12.4_linux-generic-amd64.tar.xz", tar_yolu)
                 subprocess.run(["tar", "xf", tar_yolu, "-C", TEMP_DIR], check=True)
@@ -68,7 +68,6 @@ def faturanin_tarihini_bul(xml_path):
     except Exception:
         return "9999-99-99 00:00:00"
 
-# --- ÖZEL AĞ ÇÖZÜCÜ (XSLT içindeki dış linkleri indirmek için) ---
 class HttpsResolver(etree.Resolver):
     def resolve(self, url, pubid, context):
         if url.startswith('http'):
@@ -93,7 +92,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
         
-        # Faturayı okurken ağ kapalı (Hızlı okuması için)
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
         
@@ -151,7 +149,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         transform = None
         hata_mesaji = ""
         
-        # Şablonu derlerken Ağ AÇIK (Dış linkleri sorunsuz indirebilmesi için resolver bağlandı)
         xslt_parser = etree.XMLParser(recover=True)
         xslt_parser.resolvers.add(HttpsResolver())
         
@@ -190,7 +187,9 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             'enable-javascript': "",
             'javascript-delay': 1000,
             'no-outline': None, 
-            'quiet': ''
+            'quiet': '',
+            'load-error-handling': 'ignore',          # SSL/Ağ hatalarında çökmeyi engeller
+            'load-media-error-handling': 'ignore'     # Yüklenemeyen görselleri atlar
         }
         pdfkit.from_string(str(html_dom), output_pdf_path, configuration=config, options=options)
         
