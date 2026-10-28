@@ -102,11 +102,10 @@ def fatura_verilerini_ayikla(xml_path):
             if vkn_raw:
                 vkn = str(vkn_raw).replace('.0', '').strip()
         
-        # --- YENİ: SATICI ÜNVANI ÇEKME ---
+        # --- SATICI ÜNVANI ÇEKME ---
         satici_unvani = ""
         supplier_party = tree.xpath(".//*[local-name()='AccountingSupplierParty']")
         if supplier_party:
-            # Önce PartyName içindeki Name'e bak, yoksa doğrudan Party altındaki Name'e bak
             party_name = supplier_party[0].xpath(".//*[local-name()='PartyName']")
             if party_name:
                 satici_unvani = get_text_by_tag_name('Name', party_name[0])
@@ -477,22 +476,32 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                             
                             # Excel dosyasını belleğe yaz ve Sütun Genişliklerini Ayarla
                             excel_cikti_yolu = os.path.join(work_dir, "FATURA_LISTESI.xlsx")
+                            
+                            # openpyxl kütüphanesi ile hücre formatlamalarını yapmak için
+                            from openpyxl.styles import numbers
+                            
                             with pd.ExcelWriter(excel_cikti_yolu, engine='openpyxl') as writer:
                                 df.to_excel(writer, index=False, sheet_name='FATURALAR')
                                 
-                                # Sütun genişliklerini otomatik ayarla
                                 worksheet = writer.sheets['FATURALAR']
                                 for i, col in enumerate(df.columns):
+                                    # Sütun genişliklerini otomatik ayarla
                                     max_len = max(
                                         df[col].astype(str).map(len).max(),
                                         len(str(col))
                                     ) + 2
-                                    # Sütun harfini hesapla (A, B, C... Z, AA, AB...)
                                     if i < 26:
                                         col_letter = chr(65 + i)
                                     else:
                                         col_letter = chr(64 + i // 26) + chr(65 + i % 26)
                                     worksheet.column_dimensions[col_letter].width = max_len
+                                    
+                                    # Sayısal formatlamayı uygula (Binlik ayırıcı ve 2 ondalık)
+                                    if any(x in col for x in ['Matrah', 'KDV', 'Toplam']):
+                                        for row in range(2, len(df) + 2):
+                                            cell = worksheet.cell(row=row, column=i+1)
+                                            # 1.000,00 formatı için Excel'in standart number formatı
+                                            cell.number_format = '#,##0.00'
                             
                             with open(excel_cikti_yolu, "rb") as excel_file:
                                 st.session_state.excel_data = excel_file.read()
