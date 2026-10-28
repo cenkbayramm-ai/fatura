@@ -14,6 +14,7 @@ from lxml import etree
 import pdfkit
 from PyPDF2 import PdfMerger
 import time
+import pandas as pd
 
 # --- YOL AYARLARI ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +41,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="E-Fatura Toplu PDF Dönüştürücü", page_icon="📄", layout="centered")
+st.set_page_config(page_title="E-Fatura Toplu PDF ve Excel Dönüştürücü", page_icon="📄", layout="centered")
 
 def tum_arsivleri_ac(klasor_yolu):
     bulundu = True
@@ -69,6 +70,73 @@ def faturanin_tarihini_bul(xml_path):
         return f"{tarih} {saat}"
     except Exception:
         return "9999-99-99 00:00:00"
+
+# --- EXCEL İÇİN VERİ AYIKLAMA FONKSİYONU ---
+def fatura_verilerini_ayikla(xml_path):
+    try:
+        with open(xml_path, 'rb') as f:
+            raw_content = f.read()
+        xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
+        tree = etree.fromstring(raw_content, parser=xml_parser)
+        
+        namespaces = {
+            'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2',
+            'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
+        }
+        
+        # Temel Bilgiler
+        tarih = tree.findtext('.//cbc:IssueDate', namespaces=namespaces) or ""
+        fatura_no = tree.findtext('.//cbc:ID', namespaces=namespaces) or ""
+        fatura_turu = tree.findtext('.//cbc:InvoiceTypeCode', namespaces=namespaces) or "SATIS"
+        
+        # Alıcı VKN
+        vkn = ""
+        alici_party = tree.find('.//cac:AccountingCustomerParty/cac:Party', namespaces)
+        if alici_party is not None:
+            vkn = alici_party.findtext('.//cbc:CompanyID', namespaces=namespaces) or alici_party.findtext('.//cbc:ID', namespaces=namespaces) or ""
+        
+        # Açıklama (İlk bulunan ürün/hizmet açıklaması veya genel açıklama)
+        aciklama = tree.findtext('.//cac:InvoiceLine/cac:Item/cbc:Name', namespaces=namespaces) or ""
+        if not aciklama:
+            aciklama = tree.findtext('.//cbc:Note', namespaces=namespaces) or ""
+            
+        # Tevkifat Oranı
+        tevkifat_orani = tree.findtext('.//cac:TaxTotal//cbc:Percent[../cbc:TaxTypeCode="9015"]', namespaces=namespaces) or ""
+        
+        # Toplamlar
+        ozel_matrah = ""
+        kdv_toplam = tree.findtext('.//cac:TaxTotal/cbc:TaxAmount', namespaces=namespaces) or ""
+        genel_toplam = tree.findtext('.//cac:LegalMonetaryTotal/cbc:PayableAmount', namespaces=namespaces) or ""
+        
+        # KDV Matrah ve Oranları (Dinamik)
+        kdv_dict = {}
+        for subtotal in tree.findall('.//cac:TaxSubtotal', namespaces):
+            oran = subtotal.findtext('./cbc:Percent', namespaces=namespaces)
+            matrah = subtotal.findtext('./cbc:TaxableAmount', namespaces=namespaces)
+            vergi = subtotal.findtext('./cbc:TaxAmount', namespaces=namespaces)
+            
+            if oran and matrah:
+                try:
+                    oran_int = int(float(oran))
+                    kdv_dict[f"%{oran_int}'lik KDV"] = float(vergi) if vergi else 0.0
+                    kdv_dict[f"%{oran_int}'lik Matrah"] = float(matrah)
+                except:
+                    pass
+                    
+        return {
+            "Fatura Tarihi": tarih,
+            "Fatura Numarası": fatura_no,
+            "Fatura Türü": fatura_turu,
+            "VKN/TCKN": vkn.replace('.0', '') if vkn else "",
+            "Açıklama": aciklama,
+            "Tevkifat Oranı": tevkifat_orani,
+            "Özel Matrah": ozel_matrah,
+            "Toplam KDV": float(kdv_toplam) if kdv_toplam else 0.0,
+            "Genel Toplam": float(genel_toplam) if genel_toplam else 0.0,
+            **kdv_dict
+        }
+    except Exception as e:
+        return None
 
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path=None):
     try:
@@ -105,7 +173,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                         except Exception:
                             pass
         
-        # Faturanın ETTN (UUID) numarasını ve VKN'sini güvenli şekilde XML'den çekelim
         namespaces = {
             'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2',
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2'
@@ -197,15 +264,12 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         html_dom = transform(tree)
         html_str = str(html_dom)
         
-        # --- KUSURSUZ GÖRSEL VE RESMİ GİB KAREKOD OLUŞTURUCU ---
         def resim_indirici(match):
             full_tag = match.group(0)
             resim_url = match.group(1)
             
             try:
-                # Eğer fatura Soner vb. özel entegratör QR kodu içeriyorsa
                 if 'qr.sovostr.com/qr?data=' in resim_url or fatura_uuid:
-                    # Doğrudan faturanın resmi GİB ETTN doğrulama linkini karekoda gömelim ki telefondan okutulunca faturayı direkt açsın!
                     if fatura_uuid:
                         dogrulama_linki = f"https://earsivportal.efatura.gov.tr/intragrs/sorgula.jsp?ettn={fatura_uuid}"
                     else:
@@ -213,8 +277,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
                         dogrulama_linki = html.unescape(urllib.parse.unquote(qr_data))
                     
                     safe_data = urllib.parse.quote(dogrulama_linki)
-                    
-                    # Güvenilir API ile net ve okunaklı 110x110 QR kod oluşturalım
                     hedef_url = f"https://api.qrserver.com/v1/create-qr-code/?size=110x110&data={safe_data}"
                     yeni_tag_format = '<img src="{yeni_src}" style="width: 110px; height: 110px;" alt="QR Code" align="right" />'
                 else:
@@ -274,18 +336,19 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         return False, f"Teknik Hata: {str(e)}"
 
 # ----- WEB ARAYÜZÜ -----
-st.title("🚀 E-Fatura Toplu PDF Dönüştürücü")
-st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini **tarih sırasına göre** tek bir PDF olarak size sunacaktır.")
+st.title("🚀 E-Fatura Toplu PDF ve Excel Dönüştürücü")
+st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini **tarih sırasına göre** tek bir PDF ve detaylı bir **Excel tablosu** olarak size sunacaktır.")
 
 uploaded_files = st.file_uploader("XML veya ZIP Dosyalarını Seçin", accept_multiple_files=True, type=['xml', 'zip'])
 
-if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
+if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
     if not uploaded_files:
         st.warning("Lütfen en az bir dosya yükleyin.")
     else:
         with st.spinner('Motor hazırlanıyor ve faturalar işleniyor, lütfen bekleyin...'):
             with tempfile.TemporaryDirectory() as work_dir:
                 xml_dosyalari = []
+                excel_verileri = []
                 
                 for uploaded_file in uploaded_files:
                     hedef_yol = os.path.join(work_dir, uploaded_file.name)
@@ -324,6 +387,8 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
+                        
+                        # PDF Dönüşümü
                         basarili_mi, hata_mesaji = xml_to_pdf(xml_yol, pdf_cikti, fallback_xslt_path=varsayilan_sablon, bim_xslt_path=bim_sablon)
                         
                         if basarili_mi:
@@ -332,46 +397,95 @@ if st.button("Faturaları Birleştir ve PDF Yap", type="primary"):
                         else:
                             basarisiz_sayisi += 1
                             hata_loglari.append(f"Fatura ({os.path.basename(xml_yol)}): {hata_mesaji}")
+                        
+                        # Excel Verisi Ayıklama (PDF başarılı da olsa başarısız da olsa excele ekleyelim)
+                        fatura_data = fatura_verilerini_ayikla(xml_yol)
+                        if fatura_data:
+                            excel_verileri.append(fatura_data)
                             
-                    if basarili_sayisi > 0:
+                    if basarili_sayisi > 0 or excel_verileri:
                         final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS_FATURALAR.pdf")
                         merger.write(final_pdf_yolu)
                         merger.close()
                         
-                        st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
-                        
+                        if basarili_sayisi > 0:
+                            st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura tarih sırasına göre birleştirildi.")
                         if basarisiz_sayisi > 0:
-                            st.info(f"Not: {basarisiz_sayisi} adet fatura sorunlu olduğu için atlandı.")
-                            with st.expander("Hata Detaylarını Görmek İçin Tıklayın"):
+                            st.info(f"Not: {basarisiz_sayisi} adet fatura PDF'e dönüştürülemedi (Ancak Excel'e aktarıldı).")
+                            with st.expander("PDF Hata Detaylarını Görmek İçin Tıklayın"):
                                 for log in hata_loglari:
                                     st.write(log)
+                                    
+                        # --- EXCEL OLUŞTURMA VE BOŞ SÜTUNLARI TEMİZLEME ---
+                        df = pd.DataFrame(excel_verileri)
+                        
+                        # Tamamen boş olan sütunları bul ve at
+                        df = df.dropna(axis=1, how='all')
+                        for col in df.columns:
+                            if df[col].astype(str).str.strip().eq('').all() or df[col].astype(str).eq('None').all():
+                                df = df.drop(columns=[col])
+                                
+                        # Sütun sıralamasını (Tarih, No, VKN...) düzenle
+                        oncelikli_sutunlar = ["Fatura Tarihi", "Fatura Numarası", "Fatura Türü", "VKN/TCKN", "Açıklama", "Tevkifat Oranı", "Özel Matrah"]
+                        diger_sutunlar = [c for c in df.columns if c not in oncelikli_sutunlar]
+                        
+                        # KDV ve Matrah sütunlarını sırala
+                        kdv_sutunlari = sorted([c for c in diger_sutunlar if 'KDV' in c and 'Matrah' not in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                        matrah_sutunlari = sorted([c for c in diger_sutunlar if 'Matrah' in c and 'Özel' not in c], key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 0)
+                        kalan_sutunlar = [c for c in diger_sutunlar if c not in kdv_sutunlari and c not in matrah_sutunlari and c not in ["Toplam KDV", "Genel Toplam"]]
+                        
+                        son_sutunlar = oncelikli_sutunlar + kdv_sutunlari + matrah_sutunlari + kalan_sutunlar + ["Toplam KDV", "Genel Toplam"]
+                        df = df[[c for c in son_sutunlar if c in df.columns]]
+                        
+                        # Excel dosyasını belleğe yaz
+                        excel_cikti_yolu = os.path.join(work_dir, "FATURA_LISTESI.xlsx")
+                        with pd.ExcelWriter(excel_cikti_yolu, engine='openpyxl') as writer:
+                            df.to_excel(writer, index=False, sheet_name='FATURALAR')
                             
-                        with open(final_pdf_yolu, "rb") as pdf_file:
-                            PDFbyte = pdf_file.read()
+                        # --- İNDİRME BUTONLARI ---
+                        col1, col2 = st.columns(2)
                         
-                        b64 = base64.b64encode(PDFbyte).decode()
-                        js_kodu = f"""
-                        <script>
-                            var a = document.createElement('a');
-                            a.href = 'data:application/pdf;base64,{b64}';
-                            a.download = 'BIRLESTIRILMIS_FATURALAR.pdf';
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                        </script>
-                        """
-                        components.html(js_kodu, height=0)
+                        # PDF İndirme
+                        if os.path.exists(final_pdf_yolu):
+                            with open(final_pdf_yolu, "rb") as pdf_file:
+                                PDFbyte = pdf_file.read()
+                            
+                            b64_pdf = base64.b64encode(PDFbyte).decode()
+                            js_pdf = f"""
+                            <script>
+                                var a = document.createElement('a');
+                                a.href = 'data:application/pdf;base64,{b64_pdf}';
+                                a.download = 'BIRLESTIRILMIS_FATURALAR.pdf';
+                                document.body.appendChild(a);
+                                a.click();
+                                document.body.removeChild(a);
+                            </script>
+                            """
+                            components.html(js_pdf, height=0)
+                            
+                            with col1:
+                                st.download_button(
+                                    label="📥 PDF İndir (Başlamadıysa Tıkla)",
+                                    data=PDFbyte,
+                                    file_name="BIRLESTIRILMIS_FATURALAR.pdf",
+                                    mime="application/pdf"
+                                )
                         
-                        st.download_button(
-                            label="📥 İndirme Başlamadıysa Buraya Tıklayın",
-                            data=PDFbyte,
-                            file_name="BIRLESTIRILMIS_FATURALAR.pdf",
-                            mime="application/octet-stream"
-                        )
+                        # Excel İndirme
+                        if os.path.exists(excel_cikti_yolu):
+                            with open(excel_cikti_yolu, "rb") as excel_file:
+                                Excelbyte = excel_file.read()
+                            with col2:
+                                st.download_button(
+                                    label="📊 Excel İndir",
+                                    data=Excelbyte,
+                                    file_name="FATURA_LISTESI.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                )
                     else:
-                        st.error("Hiçbir fatura dönüştürülemedi. Lütfen aşağıdaki hata raporunu bana kopyalayıp gönderin:")
+                        st.error("Hiçbir fatura işlenemedi. Lütfen aşağıdaki hata raporunu bana kopyalayıp gönderin:")
                         for log in hata_loglari:
                             st.error(log)
 
 st.markdown("---")
-st.caption("Güvenlik Notu: Yüklenen tüm faturalar ve oluşturulan PDF'ler, işlem biter bitmez sunucudan kalıcı olarak silinir.")
+st.caption("Güvenlik Notu: Yüklenen tüm faturalar ve oluşturulan dosyalar, işlem biter bitmez sunucudan kalıcı olarak silinir.")
