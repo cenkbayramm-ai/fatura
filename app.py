@@ -542,7 +542,11 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                                 df.to_excel(writer, index=False, sheet_name='FATURALAR')
                                 worksheet = writer.sheets['FATURALAR']
                                 for i, col in enumerate(df.columns):
-                                    max_len = max(df[col].astype(str).map(len).max(), len(str(col))) + 2
+                                    # Güvenli sütun genişliği hesaplama
+                                    max_len = df[col].astype(str).str.len().max()
+                                    if pd.isna(max_len): max_len = 0
+                                    max_len = max(max_len, len(str(col))) + 2
+                                    
                                     col_letter = chr(65 + i) if i < 26 else chr(64 + i // 26) + chr(65 + i % 26)
                                     worksheet.column_dimensions[col_letter].width = max_len
                                     
@@ -562,7 +566,11 @@ if st.button("Faturaları Birleştir, PDF ve Excel Yap", type="primary"):
                                 df_urun.to_excel(writer, index=False, sheet_name='ÜRÜNLER')
                                 worksheet = writer.sheets['ÜRÜNLER']
                                 for i, col in enumerate(df_urun.columns):
-                                    max_len = max(df_urun[col].astype(str).map(len).max(), len(str(col))) + 2
+                                    # Güvenli sütun genişliği hesaplama
+                                    max_len = df_urun[col].astype(str).str.len().max()
+                                    if pd.isna(max_len): max_len = 0
+                                    max_len = max(max_len, len(str(col))) + 2
+                                    
                                     col_letter = chr(65 + i) if i < 26 else chr(64 + i // 26) + chr(65 + i % 26)
                                     worksheet.column_dimensions[col_letter].width = max_len
                                     
