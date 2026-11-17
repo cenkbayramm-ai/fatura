@@ -95,7 +95,7 @@ def verileri_cikar(xml_path):
 
         f_no = tree.findtext('.//cbc:ID', namespaces=namespaces, default='')
 
-        # SATICI (Gönderen) Firma Bilgilerini Alıyoruz
+        # Satıcı (Gönderen) Firma Bilgisini Çekme (Düzeltildi)
         firma_ismi = tree.findtext('.//cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name', namespaces=namespaces, default='').strip()
         if not firma_ismi:
             first = tree.findtext('.//cac:AccountingSupplierParty/cac:Party/cac:Person/cbc:FirstName', namespaces=namespaces, default='').strip()
@@ -188,7 +188,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
         
-        # Küsurat Temizliği (Görsel İçin)
         for elem in tree.iter():
             if elem.text and type(elem.tag) == str:
                 tag_name = etree.QName(elem).localname
@@ -292,7 +291,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         html_dom = transform(tree)
         html_str = str(html_dom)
         
-        # GİB Karekod ve Resim İndirici
         def resim_indirici(match):
             full_tag = match.group(0)
             resim_url = match.group(1)
@@ -412,12 +410,10 @@ if st.button("Faturaları Çevir & Dönüştür", type="primary"):
                     bim_sablon = os.path.join(BASE_DIR, "bim_sablon.xslt")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
-                        # Veri Çıkarımı
                         fatura_verisi, urunler = verileri_cikar(xml_yol)
                         if fatura_verisi: fatura_listesi.append(fatura_verisi)
                         if urunler: urun_listesi.extend(urunler)
 
-                        # PDF Çevirimi
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
                         basarili_mi, hata_mesaji = xml_to_pdf(xml_yol, pdf_cikti, fallback_xslt_path=varsayilan_sablon, bim_xslt_path=bim_sablon)
                         
@@ -432,18 +428,15 @@ if st.button("Faturaları Çevir & Dönüştür", type="primary"):
                         st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura dönüştürüldü.")
                         st.markdown("---")
                         
-                        # --- 4 İNDİRME BUTONU YERLEŞİMİ ---
                         col1, col2 = st.columns(2)
                         col3, col4 = st.columns(2)
                         
-                        # 1. PDF Dosyası Hazırlığı
                         final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS_FATURALAR.pdf")
                         merger.write(final_pdf_yolu)
                         merger.close()
                         with open(final_pdf_yolu, "rb") as pdf_file:
                             PDFbyte = pdf_file.read()
                             
-                        # Anında indirmeyi tetikleyen JS
                         b64 = base64.b64encode(PDFbyte).decode()
                         js_kodu = f"""
                         <script>
@@ -457,6 +450,7 @@ if st.button("Faturaları Çevir & Dönüştür", type="primary"):
                         """
                         components.html(js_kodu, height=0)
                         
+                        # BUTON 1: PDF
                         with col1:
                             st.download_button(
                                 label="📄 1. Birleştirilmiş PDF İndir",
@@ -466,9 +460,60 @@ if st.button("Faturaları Çevir & Dönüştür", type="primary"):
                                 use_container_width=True
                             )
                         
-                        # Diğer Çıktıların (Veri Tabloları) Hazırlığı
                         if fatura_listesi:
                             df_fatura = pd.DataFrame(fatura_listesi)
                             
-                            # Luca CSV Hazırlık
-                            luca_cols = ['F.TARİ
+                            # BUTON 2: LUCA CSV
+                            luca_cols = ['F.TARİH', 'F.NO', 'FİRMA İSMİ', 'BEDEL', 'KDV', 'TOPLAM', 'MATRAH1 ', 'KDV1', 'MATRAH10', 'KDV10', 'MATRAH20', 'KDV20']
+                            df_csv = df_fatura[luca_cols]
+                            csv_data = df_csv.to_csv(index=False, sep=';', decimal=',').encode('cp1254', errors='replace')
+                            with col2:
+                                st.download_button(
+                                    label="📑 2. Luca CSV Aktarım",
+                                    data=csv_data,
+                                    file_name="LUCA_AKTARIM.csv",
+                                    mime="text/csv",
+                                    use_container_width=True
+                                )
+
+                            # BUTON 3: FATURA EXCEL
+                            io_fatura = io.BytesIO()
+                            df_fatura.to_excel(io_fatura, index=False, engine='openpyxl', sheet_name='Faturalar')
+                            io_fatura.seek(0)
+                            with col3:
+                                st.download_button(
+                                    label="📊 3. Fatura Excel Listesi",
+                                    data=io_fatura,
+                                    file_name="FATURA_LISTESI.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    use_container_width=True
+                                )
+                                
+                            # BUTON 4: ÜRÜN EXCEL
+                            if urun_listesi:
+                                df_urun = pd.DataFrame(urun_listesi)
+                                io_urun = io.BytesIO()
+                                df_urun.to_excel(io_urun, index=False, engine='openpyxl', sheet_name='Ürünler')
+                                io_urun.seek(0)
+                                with col4:
+                                    st.download_button(
+                                        label="📦 4. Ürün Excel Listesi",
+                                        data=io_urun,
+                                        file_name="URUN_LISTESI.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        use_container_width=True
+                                    )
+                        
+                        st.markdown("---")
+                        if basarisiz_sayisi > 0:
+                            st.info(f"Not: {basarisiz_sayisi} adet fatura sorunlu olduğu için atlandı.")
+                            with st.expander("⚠️ Hata Detaylarını Görmek İçin Tıklayın"):
+                                for log in hata_loglari:
+                                    st.write(log)
+                    else:
+                        st.error("Hiçbir fatura dönüştürülemedi.")
+                        for log in hata_loglari:
+                            st.error(log)
+
+st.markdown("---")
+st.caption("Güvenlik Notu: Yüklenen tüm faturalar ve oluşturulan belgeler, işlem biter bitmez sunucudan kalıcı olarak silinir.")
