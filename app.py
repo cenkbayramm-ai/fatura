@@ -95,13 +95,14 @@ def verileri_cikar(xml_path):
 
         f_no = tree.findtext('.//cbc:ID', namespaces=namespaces, default='')
 
-        firma_ismi = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:PartyName/cbc:Name', namespaces=namespaces, default='').strip()
+        # SATICI (Gönderen) Firma Bilgilerini Alıyoruz
+        firma_ismi = tree.findtext('.//cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name', namespaces=namespaces, default='').strip()
         if not firma_ismi:
-            first = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:Person/cbc:FirstName', namespaces=namespaces, default='').strip()
-            last = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:Person/cbc:FamilyName', namespaces=namespaces, default='').strip()
+            first = tree.findtext('.//cac:AccountingSupplierParty/cac:Party/cac:Person/cbc:FirstName', namespaces=namespaces, default='').strip()
+            last = tree.findtext('.//cac:AccountingSupplierParty/cac:Party/cac:Person/cbc:FamilyName', namespaces=namespaces, default='').strip()
             firma_ismi = f"{first} {last}".strip()
 
-        vkn_tckn = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:PartyIdentification/cbc:ID', namespaces=namespaces, default='').strip()
+        vkn_tckn = tree.findtext('.//cac:AccountingSupplierParty/cac:Party/cac:PartyIdentification/cbc:ID', namespaces=namespaces, default='').strip()
         toplam = float(tree.findtext('.//cac:LegalMonetaryTotal/cbc:PayableAmount', namespaces=namespaces, default='0'))
         
         matrah1 = matrah10 = matrah20 = 0.0
@@ -158,8 +159,8 @@ def verileri_cikar(xml_path):
             urun_listesi.append({
                 'Fatura Tarihi': f_tarih,
                 'Fatura No': f_no,
-                'Alıcı VKN/TCKN': vkn_tckn,
-                'Alıcı Firma': firma_ismi,
+                'Satıcı VKN/TCKN': vkn_tckn,
+                'Satıcı Firma': firma_ismi,
                 'Ürün Kodu': urun_kodu,
                 'Ürün Adı': urun_adi,
                 'Miktar': round(miktar, 2),
@@ -364,7 +365,6 @@ st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini bur
 
 uploaded_files = st.file_uploader("Fatura Arşivlerinizi Seçin (XML/ZIP)", accept_multiple_files=True, type=['xml', 'zip'])
 
-# Buton ismini güncelledik
 if st.button("Faturaları Çevir & Dönüştür", type="primary"):
     if not uploaded_files:
         st.warning("Lütfen işlem yapmadan önce dosya yükleyin.")
@@ -466,61 +466,9 @@ if st.button("Faturaları Çevir & Dönüştür", type="primary"):
                                 use_container_width=True
                             )
                         
-                        # 2, 3 ve 4. Çıktıların (Veri Tabloları) Hazırlığı
+                        # Diğer Çıktıların (Veri Tabloları) Hazırlığı
                         if fatura_listesi:
                             df_fatura = pd.DataFrame(fatura_listesi)
                             
-                            # Luca CSV Hazırlık (VKN'siz Sadece Matrahlı Format)
-                            luca_cols = ['F.TARİH', 'F.NO', 'FİRMA İSMİ', 'BEDEL', 'KDV', 'TOPLAM', 'MATRAH1 ', 'KDV1', 'MATRAH10', 'KDV10', 'MATRAH20', 'KDV20']
-                            df_csv = df_fatura[luca_cols]
-                            csv_data = df_csv.to_csv(index=False, sep=';', decimal=',').encode('cp1254', errors='replace')
-                            with col2:
-                                st.download_button(
-                                    label="📑 2. Luca CSV Aktarım",
-                                    data=csv_data,
-                                    file_name="LUCA_AKTARIM.csv",
-                                    mime="text/csv",
-                                    use_container_width=True
-                                )
-
-                            # Fatura Excel Hazırlık
-                            io_fatura = io.BytesIO()
-                            df_fatura.to_excel(io_fatura, index=False, engine='openpyxl', sheet_name='Faturalar')
-                            io_fatura.seek(0)
-                            with col3:
-                                st.download_button(
-                                    label="📊 3. Fatura Excel Listesi",
-                                    data=io_fatura,
-                                    file_name="FATURA_LISTESI.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    use_container_width=True
-                                )
-                                
-                            # Ürün Excel Hazırlık
-                            if urun_listesi:
-                                df_urun = pd.DataFrame(urun_listesi)
-                                io_urun = io.BytesIO()
-                                df_urun.to_excel(io_urun, index=False, engine='openpyxl', sheet_name='Ürünler')
-                                io_urun.seek(0)
-                                with col4:
-                                    st.download_button(
-                                        label="📦 4. Ürün Excel Listesi",
-                                        data=io_urun,
-                                        file_name="URUN_LISTESI.xlsx",
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                        use_container_width=True
-                                    )
-                        
-                        st.markdown("---")
-                        if basarisiz_sayisi > 0:
-                            st.info(f"Not: {basarisiz_sayisi} adet fatura sorunlu olduğu için atlandı.")
-                            with st.expander("⚠️ Hata Detaylarını Görmek İçin Tıklayın"):
-                                for log in hata_loglari:
-                                    st.write(log)
-                    else:
-                        st.error("Hiçbir fatura dönüştürülemedi.")
-                        for log in hata_loglari:
-                            st.error(log)
-
-st.markdown("---")
-st.caption("Güvenlik Notu: Yüklenen tüm faturalar ve oluşturulan belgeler, işlem biter bitmez sunucudan kalıcı olarak silinir.")
+                            # Luca CSV Hazırlık
+                            luca_cols = ['F.TARİ
