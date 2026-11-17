@@ -3,3 +3,4 @@ lxml
 pdfkit
 PyPDF2
 pandas
+openpyxl
