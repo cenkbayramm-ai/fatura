@@ -22,7 +22,7 @@ TEMP_DIR = tempfile.gettempdir()
 WK_DIR = os.path.join(TEMP_DIR, "wkhtmltox")
 WK_PATH = os.path.join(WK_DIR, "bin", "wkhtmltopdf")
 
-# --- LINUX İÇİN PDF MOTORUNU TEMP KLASÖRÜNE KURMA ---
+# --- LİNUX İÇİN PDF MOTORUNU TEMP KLASÖRÜNE KURMA ---
 @st.cache_resource
 def motoru_indir():
     if not os.path.exists(WK_PATH):
@@ -41,8 +41,35 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="E-Fatura Toplu PDF Dönüştürücü", page_icon="📄", layout="centered")
+st.set_page_config(page_title="E-Fatura Akıllı Asistan", page_icon="💼", layout="wide")
 
+# ==========================================
+# SESSION STATE (KALICI BELLEK) BAŞLATMA
+# ==========================================
+if 'islem_tamam' not in st.session_state:
+    st.session_state.islem_tamam = False
+if 'pdf_veri' not in st.session_state:
+    st.session_state.pdf_veri = None
+if 'csv_veri' not in st.session_state:
+    st.session_state.csv_veri = None
+if 'fatura_excel_veri' not in st.session_state:
+    st.session_state.fatura_excel_veri = None
+if 'urun_excel_veri' not in st.session_state:
+    st.session_state.urun_excel_veri = None
+if 'hata_loglari' not in st.session_state:
+    st.session_state.hata_loglari = []
+
+def session_sifirla():
+    st.session_state.islem_tamam = False
+    st.session_state.pdf_veri = None
+    st.session_state.csv_veri = None
+    st.session_state.fatura_excel_veri = None
+    st.session_state.urun_excel_veri = None
+    st.session_state.hata_loglari = []
+
+# ==========================================
+# YARDIMCI FONKSİYONLAR
+# ==========================================
 def tum_arsivleri_ac(klasor_yolu):
     bulundu = True
     while bulundu:
@@ -71,8 +98,7 @@ def faturanin_tarihini_bul(xml_path):
     except Exception:
         return "9999-99-99 00:00:00"
 
-# --- OTOMATİK LUCA CSV ÇIKARTICI ---
-def luca_verisi_cikar(xml_path):
+def verileri_cikar(xml_path):
     try:
         with open(xml_path, 'rb') as f:
             raw_content = f.read()
@@ -93,20 +119,19 @@ def luca_verisi_cikar(xml_path):
 
         f_no = tree.findtext('.//cbc:ID', namespaces=namespaces, default='')
 
-        # Alıcı Firma/Kişi Bilgisi
         firma_ismi = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:PartyName/cbc:Name', namespaces=namespaces, default='').strip()
         if not firma_ismi:
             first = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:Person/cbc:FirstName', namespaces=namespaces, default='').strip()
             last = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:Person/cbc:FamilyName', namespaces=namespaces, default='').strip()
             firma_ismi = f"{first} {last}".strip()
 
+        vkn_tckn = tree.findtext('.//cac:AccountingCustomerParty/cac:Party/cac:PartyIdentification/cbc:ID', namespaces=namespaces, default='').strip()
         toplam = float(tree.findtext('.//cac:LegalMonetaryTotal/cbc:PayableAmount', namespaces=namespaces, default='0'))
         
         matrah1 = matrah10 = matrah20 = 0.0
         kdv1 = kdv10 = kdv20 = 0.0
 
         for tax_subtotal in tree.findall('.//cac:TaxTotal/cac:TaxSubtotal', namespaces=namespaces):
-            # KDV kodu 0015'tir
             tax_code = tax_subtotal.findtext('.//cac:TaxScheme/cbc:TaxTypeCode', namespaces=namespaces, default='')
             if tax_code == '0015':
                 percent = float(tax_subtotal.findtext('cbc:Percent', namespaces=namespaces, default='0'))
@@ -126,9 +151,11 @@ def luca_verisi_cikar(xml_path):
         bedel = matrah1 + matrah10 + matrah20
         kdv_toplam = kdv1 + kdv10 + kdv20
 
-        return {
+        # Luca Fatura Özeti
+        fatura_dict = {
             'F.TARİH': f_tarih,
             'F.NO': f_no,
+            'VKN/TCKN': vkn_tckn,
             'FİRMA İSMİ': firma_ismi,
             'BEDEL': round(bedel, 2),
             'KDV': round(kdv_toplam, 2),
@@ -140,8 +167,35 @@ def luca_verisi_cikar(xml_path):
             'MATRAH20': round(matrah20, 2),
             'KDV20': round(kdv20, 2)
         }
+
+        # Ürün (Kalem) Listesi
+        urun_listesi = []
+        for line in tree.findall('.//cac:InvoiceLine', namespaces=namespaces):
+            urun_kodu = line.findtext('.//cac:Item/cac:SellersItemIdentification/cbc:ID', namespaces=namespaces, default='').strip()
+            urun_adi = line.findtext('.//cac:Item/cbc:Name', namespaces=namespaces, default='').strip()
+            miktar = float(line.findtext('.//cbc:InvoicedQuantity', namespaces=namespaces, default='0'))
+            birim_fiyat = float(line.findtext('.//cac:Price/cbc:PriceAmount', namespaces=namespaces, default='0'))
+            iskonto = float(line.findtext('.//cac:AllowanceCharge/cbc:Amount', namespaces=namespaces, default='0'))
+            kdv_orani = float(line.findtext('.//cac:TaxTotal/cac:TaxSubtotal/cbc:Percent', namespaces=namespaces, default='0'))
+            tutar = float(line.findtext('.//cbc:LineExtensionAmount', namespaces=namespaces, default='0'))
+
+            urun_listesi.append({
+                'Fatura Tarihi': f_tarih,
+                'Fatura No': f_no,
+                'Alıcı VKN/TCKN': vkn_tckn,
+                'Alıcı Firma': firma_ismi,
+                'Ürün Kodu': urun_kodu,
+                'Ürün Adı': urun_adi,
+                'Miktar': round(miktar, 2),
+                'Birim Fiyat': round(birim_fiyat, 4),
+                'İskonto Tutarı': round(iskonto, 2),
+                'KDV Oranı': f"%{int(kdv_orani)}",
+                'KDV Hariç Tutar': round(tutar, 2)
+            })
+
+        return fatura_dict, urun_listesi
     except Exception:
-        return None
+        return None, []
 
 def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path=None):
     try:
@@ -154,7 +208,6 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
         is_bim = b'1750051846' in raw_content or b'earsivbimxslt' in raw_content
             
         raw_content = re.sub(br'<\?xml-stylesheet[^>]*\?>', b'', raw_content)
-        
         xml_parser = etree.XMLParser(recover=True, no_network=True, resolve_entities=False)
         tree = etree.fromstring(raw_content, parser=xml_parser)
         
@@ -235,12 +288,10 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             with open(fallback_xslt_path, 'rb') as f_sablon:
                 xslt_content = f_sablon.read()
 
-        if not xslt_content:
-            return False, "Şablon bulunamadı."
+        if not xslt_content: return False, "Şablon bulunamadı."
 
         transform = None
         xslt_parser = etree.XMLParser(recover=True, no_network=True)
-        
         def sablon_derle(content_bytes):
             xslt_str = content_bytes.decode('utf-8', errors='ignore')
             xslt_str = re.sub(r'<\?xml.*\?>', '', xslt_str)
@@ -251,31 +302,26 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
 
         try:
             if xslt_content: transform = sablon_derle(xslt_content)
-        except Exception:
-            pass
-
+        except Exception: pass
         if transform is None and fallback_xslt_path and os.path.exists(fallback_xslt_path):
             try:
                 with open(fallback_xslt_path, 'rb') as f_sablon:
                     transform = sablon_derle(f_sablon.read())
-            except Exception:
-                pass
+            except Exception: pass
 
         if transform is None: return False, "Şablon kilitlendi."
 
         html_dom = transform(tree)
         html_str = str(html_dom)
         
+        # GİB Karekod ve Resim İndirici
         def resim_indirici(match):
             full_tag = match.group(0)
             resim_url = match.group(1)
             try:
                 if 'qr.sovostr.com/qr?data=' in resim_url or fatura_uuid:
-                    if fatura_uuid:
-                        dogrulama_linki = f"https://earsivportal.efatura.gov.tr/intragrs/sorgula.jsp?ettn={fatura_uuid}"
-                    else:
-                        qr_data = resim_url.split('data=', 1)[-1]
-                        dogrulama_linki = html.unescape(urllib.parse.unquote(qr_data))
+                    if fatura_uuid: dogrulama_linki = f"https://earsivportal.efatura.gov.tr/intragrs/sorgula.jsp?ettn={fatura_uuid}"
+                    else: dogrulama_linki = html.unescape(urllib.parse.unquote(resim_url.split('data=', 1)[-1]))
                     
                     safe_data = urllib.parse.quote(dogrulama_linki)
                     hedef_url = f"https://api.qrserver.com/v1/create-qr-code/?size=110x110&data={safe_data}"
@@ -315,8 +361,7 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
             try:
                 pdfkit.from_string(html_str, output_pdf_path, configuration=config, options=options)
             except IOError as e:
-                if not (os.path.exists(output_pdf_path) and os.path.getsize(output_pdf_path) > 10):
-                    raise e
+                if not (os.path.exists(output_pdf_path) and os.path.getsize(output_pdf_path) > 10): raise e
         except Exception:
             if fallback_xslt_path and os.path.exists(fallback_xslt_path):
                 with open(fallback_xslt_path, 'rb') as f_sablon:
@@ -334,24 +379,23 @@ def xml_to_pdf(xml_path, output_pdf_path, fallback_xslt_path=None, bim_xslt_path
     except Exception as e:
         return False, f"Teknik Hata: {str(e)}"
 
-# ----- WEB ARAYÜZÜ -----
-st.title("🚀 E-Fatura Toplu PDF & Luca CSV Dönüştürücü")
-st.markdown("XML faturalarınızı veya faturaları içeren ZIP arşivlerini buraya yükleyin. Sistem hepsini **tarih sırasına göre tek bir PDF**'e çevirirken, aynı zamanda **Luca için Fatura Aktarım CSV'sini** hazırlayacaktır.")
+# ==========================================
+# SOL MENÜ (SIDEBAR) VE ANA YAPI
+# ==========================================
+st.sidebar.title("⚙️ Fatura İşlem Merkezi")
 
-uploaded_files = st.file_uploader("XML veya ZIP Dosyalarını Seçin", accept_multiple_files=True, type=['xml', 'zip'])
-
-if st.button("Faturaları İşle", type="primary"):
+uploaded_files = st.sidebar.file_uploader("Fatura Arşivlerinizi Seçin (XML/ZIP)", accept_multiple_files=True, type=['xml', 'zip'])
+if st.sidebar.button("🚀 Dosyaları İşle", type="primary"):
     if not uploaded_files:
-        st.warning("Lütfen en az bir dosya yükleyin.")
+        st.sidebar.warning("Lütfen işlem yapmadan önce dosya yükleyin.")
     else:
-        with st.spinner('Faturalar işleniyor, lütfen bekleyin...'):
+        session_sifirla() # Yeni işlemde eski belleği temizle
+        with st.spinner('Tüm dosyalar okunuyor ve arka planda işleniyor...'):
             with tempfile.TemporaryDirectory() as work_dir:
                 xml_dosyalari = []
-                
                 for uploaded_file in uploaded_files:
                     hedef_yol = os.path.join(work_dir, uploaded_file.name)
-                    with open(hedef_yol, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
+                    with open(hedef_yol, "wb") as f: f.write(uploaded_file.getbuffer())
                 
                 tum_arsivleri_ac(work_dir)
 
@@ -359,38 +403,33 @@ if st.button("Faturaları İşle", type="primary"):
                     for file in files:
                         tam_yol = os.path.join(root, file)
                         if file.lower().endswith('.xml'):
-                            if tam_yol not in xml_dosyalari:
-                                xml_dosyalari.append(tam_yol)
+                            if tam_yol not in xml_dosyalari: xml_dosyalari.append(tam_yol)
                         elif not file.lower().endswith(('.pdf', '.html', '.htm', '.xslt', '.png', '.jpg')):
                             try:
                                 with open(tam_yol, 'rb') as tf:
                                     head = tf.read(250)
                                     if b'<?xml' in head or b'<Invoice' in head:
-                                        if tam_yol not in xml_dosyalari:
-                                            xml_dosyalari.append(tam_yol)
+                                        if tam_yol not in xml_dosyalari: xml_dosyalari.append(tam_yol)
                             except: pass
 
                 if not xml_dosyalari:
-                    st.error("Yüklenen dosyaların içinde geçerli bir XML bulunamadı.")
+                    st.sidebar.error("Yüklenen dosyaların içinde geçerli bir XML bulunamadı.")
                 else:
                     xml_dosyalari.sort(key=lambda x: faturanin_tarihini_bul(x))
-                    
                     merger = PdfMerger()
                     basarili_sayisi = 0
-                    basarisiz_sayisi = 0
-                    hata_loglari = []
-                    luca_verileri = []
+                    
+                    fatura_listesi = []
+                    urun_listesi = []
                     
                     varsayilan_sablon = os.path.join(BASE_DIR, "sablon.xslt")
                     bim_sablon = os.path.join(BASE_DIR, "bim_sablon.xslt")
                     
                     for idx, xml_yol in enumerate(xml_dosyalari):
-                        # Luca verisini çek
-                        veri = luca_verisi_cikar(xml_yol)
-                        if veri:
-                            luca_verileri.append(veri)
+                        fatura_verisi, urunler = verileri_cikar(xml_yol)
+                        if fatura_verisi: fatura_listesi.append(fatura_verisi)
+                        if urunler: urun_listesi.extend(urunler)
 
-                        # PDF oluştur
                         pdf_cikti = os.path.join(work_dir, f"fatura_{idx}.pdf")
                         basarili_mi, hata_mesaji = xml_to_pdf(xml_yol, pdf_cikti, fallback_xslt_path=varsayilan_sablon, bim_xslt_path=bim_sablon)
                         
@@ -398,58 +437,132 @@ if st.button("Faturaları İşle", type="primary"):
                             merger.append(pdf_cikti)
                             basarili_sayisi += 1
                         else:
-                            basarisiz_sayisi += 1
-                            hata_loglari.append(f"Fatura ({os.path.basename(xml_yol)}): {hata_mesaji}")
+                            st.session_state.hata_loglari.append(f"Fatura ({os.path.basename(xml_yol)}): {hata_mesaji}")
                             
                     if basarili_sayisi > 0:
-                        st.success(f"✅ İşlem Tamamlandı! {basarili_sayisi} adet fatura sorunsuz birleştirildi.")
-                        
-                        if basarisiz_sayisi > 0:
-                            st.info(f"Not: {basarisiz_sayisi} adet fatura sorunlu olduğu için atlandı.")
-                            with st.expander("Hata Detaylarını Görmek İçin Tıklayın"):
-                                for log in hata_loglari:
-                                    st.write(log)
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        # --- 1. BUTON: PDF İNDİR ---
-                        final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS_FATURALAR.pdf")
+                        # 1. PDF Belleğe Kayıt
+                        final_pdf_yolu = os.path.join(work_dir, "BIRLESTIRILMIS.pdf")
                         merger.write(final_pdf_yolu)
                         merger.close()
-                        
                         with open(final_pdf_yolu, "rb") as pdf_file:
-                            PDFbyte = pdf_file.read()
-                            
-                        with col1:
-                            st.download_button(
-                                label="📥 1. Adım: Birleştirilmiş PDF'i İndir",
-                                data=PDFbyte,
-                                file_name="BIRLESTIRILMIS_FATURALAR.pdf",
-                                mime="application/pdf",
-                                use_container_width=True
-                            )
+                            st.session_state.pdf_veri = pdf_file.read()
                         
-                        # --- 2. BUTON: LUCA CSV İNDİR ---
-                        with col2:
-                            if luca_verileri:
-                                df_luca = pd.DataFrame(luca_verileri)
-                                # Luca'nın okuyabileceği Windows-1254 (cp1254) formatında ve virgüllü sistemde kodla
-                                csv_data = df_luca.to_csv(index=False, sep=';', decimal=',').encode('cp1254', errors='replace')
-                                
-                                st.download_button(
-                                    label="📊 2. Adım: Luca CSV Aktarım Dosyasını İndir",
-                                    data=csv_data,
-                                    file_name="LUCA_MATRAHLI_AKTARIM.csv",
-                                    mime="text/csv",
-                                    use_container_width=True
-                                )
-                            else:
-                                st.warning("CSV için veri çıkarılamadı.")
-                                
+                        # 2. Fatura ve Ürün Verilerini Excel & CSV Olarak Belleğe Kayıt
+                        if fatura_listesi:
+                            df_fatura = pd.DataFrame(fatura_listesi)
+                            # CSV Formatı (Luca İçin - VKN Hariç Klasik Sütunlar)
+                            luca_cols = ['F.TARİH', 'F.NO', 'FİRMA İSMİ', 'BEDEL', 'KDV', 'TOPLAM', 'MATRAH1 ', 'KDV1', 'MATRAH10', 'KDV10', 'MATRAH20', 'KDV20']
+                            df_csv = df_fatura[luca_cols]
+                            st.session_state.csv_veri = df_csv.to_csv(index=False, sep=';', decimal=',').encode('cp1254', errors='replace')
+                            
+                            # Excel Fatura Formatı
+                            io_fatura = io.BytesIO()
+                            df_fatura.to_excel(io_fatura, index=False, engine='openpyxl', sheet_name='Faturalar')
+                            st.session_state.fatura_excel_veri = io_fatura.getvalue()
+                            
+                        if urun_listesi:
+                            df_urun = pd.DataFrame(urun_listesi)
+                            io_urun = io.BytesIO()
+                            df_urun.to_excel(io_urun, index=False, engine='openpyxl', sheet_name='Ürünler')
+                            st.session_state.urun_excel_veri = io_urun.getvalue()
+                        
+                        st.session_state.islem_tamam = True
+                        st.sidebar.success(f"İşlem Tamamlandı! Menülerden sonuçları indirebilirsiniz.")
                     else:
-                        st.error("Hiçbir fatura dönüştürülemedi. Lütfen aşağıdaki hata raporunu bana kopyalayıp gönderin:")
-                        for log in hata_loglari:
-                            st.error(log)
+                        st.sidebar.error("Hiçbir fatura dönüştürülemedi.")
 
-st.markdown("---")
-st.caption("Güvenlik Notu: Yüklenen tüm faturalar ve oluşturulan PDF'ler, işlem biter bitmez sunucudan kalıcı olarak silinir.")
+st.sidebar.markdown("---")
+
+menu = st.sidebar.radio(
+    "📂 DOSYA ÇIKTILARI (MENÜ)",
+    ("📄 1. PDF Dosyası", "📦 2. Ürün Excel Listesi", "📊 3. Fatura Excel Listesi", "📑 4. Luca CSV Aktarımı")
+)
+
+# ==========================================
+# MENÜ İÇERİKLERİ
+# ==========================================
+if menu == "📄 1. PDF Dosyası":
+    st.title("📄 Birleştirilmiş PDF Çıktısı")
+    st.info("Bu sayfada, yüklediğiniz faturaların tek bir PDF dosyasında birleştirilmiş hali bulunur.")
+    
+    if st.session_state.islem_tamam and st.session_state.pdf_veri:
+        b64 = base64.b64encode(st.session_state.pdf_veri).decode()
+        js_kodu = f"""
+        <script>
+            var a = document.createElement('a');
+            a.href = 'data:application/pdf;base64,{b64}';
+            a.download = 'TOPLU_FATURALAR.pdf';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        </script>
+        """
+        components.html(js_kodu, height=0)
+        
+        st.download_button(
+            label="📥 PDF Dosyasını İndir",
+            data=st.session_state.pdf_veri,
+            file_name="TOPLU_FATURALAR.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+        
+        if st.session_state.hata_loglari:
+            with st.expander("⚠️ Dönüştürülemeyen Faturaların Logları (Hata Detayı)"):
+                for log in st.session_state.hata_loglari: st.write(log)
+    else:
+        st.warning("Henüz bir işlem yapılmadı. Lütfen sol taraftaki menüden dosyalarınızı yükleyip 'Dosyaları İşle' butonuna basınız.")
+
+elif menu == "📦 2. Ürün Excel Listesi":
+    st.title("📦 Detaylı Ürün (Kalem) Listesi")
+    st.info("Faturalarınızın içindeki tüm satılan ürünlerin dökümünü içeren Excel dosyasıdır.")
+    
+    if st.session_state.islem_tamam and st.session_state.urun_excel_veri:
+        st.download_button(
+            label="📥 Ürün Listesini Excel Olarak İndir (.xlsx)",
+            data=st.session_state.urun_excel_veri,
+            file_name="URUN_LISTESI.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+        # Önizleme
+        df_onizleme = pd.read_excel(io.BytesIO(st.session_state.urun_excel_veri))
+        st.dataframe(df_onizleme, use_container_width=True)
+    else:
+        st.warning("Henüz bir işlem yapılmadı veya faturaların içinde ürün detayı bulunamadı.")
+
+elif menu == "📊 3. Fatura Excel Listesi":
+    st.title("📊 Fatura Özeti Excel Listesi")
+    st.info("Faturalarınızın başlık, VKN ve genel toplam bilgilerini içeren standart Excel dökümüdür.")
+    
+    if st.session_state.islem_tamam and st.session_state.fatura_excel_veri:
+        st.download_button(
+            label="📥 Fatura Listesini Excel Olarak İndir (.xlsx)",
+            data=st.session_state.fatura_excel_veri,
+            file_name="FATURA_LISTESI.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+        # Önizleme
+        df_onizleme = pd.read_excel(io.BytesIO(st.session_state.fatura_excel_veri))
+        st.dataframe(df_onizleme, use_container_width=True)
+    else:
+        st.warning("Henüz bir işlem yapılmadı. Lütfen sol taraftaki menüden dosyalarınızı yükleyin.")
+
+elif menu == "📑 4. Luca CSV Aktarımı":
+    st.title("📑 Luca Matrahlı Fatura Aktarımı")
+    st.info("Luca muhasebe programına fiş/fatura aktarımı yapabilmeniz için (KDV'lerine göre ayrıştırılmış) özel CSV dosyasıdır.")
+    
+    if st.session_state.islem_tamam and st.session_state.csv_veri:
+        st.download_button(
+            label="📥 Luca CSV Dosyasını İndir",
+            data=st.session_state.csv_veri,
+            file_name="LUCA_AKTARIM.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        # Önizleme
+        df_onizleme = pd.read_csv(io.BytesIO(st.session_state.csv_veri), sep=';', encoding='cp1254')
+        st.dataframe(df_onizleme, use_container_width=True)
+    else:
+        st.warning("Henüz bir işlem yapılmadı. Lütfen sol taraftaki menüden dosyalarınızı yükleyin.")
