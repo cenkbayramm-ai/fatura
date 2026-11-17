@@ -2,4 +2,4 @@ streamlit
 lxml
 pdfkit
 PyPDF2
-openpyxl
+pandas
