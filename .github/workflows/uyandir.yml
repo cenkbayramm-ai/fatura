@@ -1,0 +1,17 @@
+name: Streamlit Uyandir
+
+on:
+  schedule:
+    # Pazar hariç her gün (Pzt-Cmt) Türkiye saatiyle 07:45'te (UTC 04:45) çalışır
+    - cron: '45 4 * * 1-6'
+  workflow_dispatch:
+
+jobs:
+  wake-up:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Uygulamayı Ziyaret Et ve Uyandır
+        uses: gpenessot/streamlit-keep-alive@main
+        with:
+          app-urls: 'https://fatura-2.streamlit.app/'
+          timeout: 60
